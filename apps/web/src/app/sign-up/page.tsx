@@ -2,8 +2,10 @@
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { createClient } from "@/lib/supabase/client";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
+import { toast } from "sonner";
 import { z } from "zod";
 
 const signUpSchema = z.object({
@@ -21,6 +23,7 @@ const signUpSchema = z.object({
 type SignUpValues = z.infer<typeof signUpSchema>;
 
 export default function SignUpPage() {
+    const supabase = createClient();
     const {
         register,
         handleSubmit,
@@ -37,6 +40,27 @@ export default function SignUpPage() {
     const onSubmit = async (values: SignUpValues) => {
         // TODO: Call sign up (e.g. Supabase), show loading/success/error.
         console.log(values);
+
+        const { data, error } = await supabase.auth.signUp({
+            email: values.email,
+            password: values.password,
+            options: {
+                emailRedirectTo: `${location.origin}/auth/callback`,
+            },
+        })
+
+        if (error) {
+            console.error(error);
+            toast.error("Sign up failed", {
+                description: error.message,
+            });
+        } else {
+            console.log(data);
+            toast.success("Sign up successful", {
+                description: "Please check your email for verification",
+            });
+        }
+
     };
 
     return (
