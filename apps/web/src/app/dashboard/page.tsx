@@ -1,4 +1,5 @@
 import LogoutButton from "@/components/logout-button";
+import { DashboardOrg } from "./dashboard-org";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 
@@ -13,8 +14,13 @@ export default async function Dashboard() {
         redirect("/login");
     }
 
-    return <div>Welcome {user.email}
-
-        <LogoutButton />
-    </div>;
+    return (
+        <div className="flex flex-col gap-4 p-6">
+            <div>
+                <p className="text-lg">Welcome {user.email}</p>
+                <DashboardOrg />
+            </div>
+            <LogoutButton />
+        </div>
+    );
 }

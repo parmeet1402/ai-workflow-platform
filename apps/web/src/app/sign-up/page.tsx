@@ -2,6 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { getAuthErrorMessage } from "@/lib/auth/supabase-errors";
 import { createClient } from "@/lib/supabase/client";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
@@ -38,29 +39,26 @@ export default function SignUpPage() {
     });
 
     const onSubmit = async (values: SignUpValues) => {
-        // TODO: Call sign up (e.g. Supabase), show loading/success/error.
-        console.log(values);
-
-        const { data, error } = await supabase.auth.signUp({
+        const { error } = await supabase.auth.signUp({
             email: values.email,
             password: values.password,
             options: {
                 emailRedirectTo: `${location.origin}/auth/callback`,
+                data: {
+                    full_name: values.name,
+                },
             },
-        })
+        });
 
         if (error) {
-            console.error(error);
             toast.error("Sign up failed", {
-                description: error.message,
+                description: getAuthErrorMessage(error),
             });
         } else {
-            console.log(data);
             toast.success("Sign up successful", {
                 description: "Please check your email for verification",
             });
         }
-
     };
 
     return (

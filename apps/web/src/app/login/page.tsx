@@ -2,6 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { getAuthErrorMessage } from "@/lib/auth/supabase-errors";
 import { createClient } from "@/lib/supabase/client";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
@@ -40,7 +41,7 @@ export default function LoginPage() {
 
         if (error) {
             toast.error("Login failed", {
-                description: error.message,
+                description: getAuthErrorMessage(error),
             });
         } else {
             toast.success("Signed in", {
