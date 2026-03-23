@@ -3,11 +3,12 @@ import { Geist, Geist_Mono, Inter } from "next/font/google";
 import "./globals.css";
 import { cn } from "@/lib/utils";
 import { AuthProvider } from "@/features/auth/auth-context";
+import { TooltipProvider } from "@/components/ui/tooltip"
 import { getMembershipForUser } from "@/lib/supabase/membership";
 import { createClient } from "@/lib/supabase/server";
 import { Toaster } from "sonner";
 
-const inter = Inter({subsets:['latin'],variable:'--font-sans'});
+const inter = Inter({ subsets: ['latin'], variable: '--font-sans' });
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -49,15 +50,17 @@ export default async function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <AuthProvider
-          initialUser={user}
-          initialOrganizationId={initialOrganizationId}
-          initialOrganizationName={initialOrganizationName}
-          initialRole={initialRole}
-        >
-          {children}
-          <Toaster richColors closeButton />
-        </AuthProvider>
+        <TooltipProvider>
+          <AuthProvider
+            initialUser={user}
+            initialOrganizationId={initialOrganizationId}
+            initialOrganizationName={initialOrganizationName}
+            initialRole={initialRole}
+          >
+            {children}
+            <Toaster richColors closeButton />
+          </AuthProvider>
+        </TooltipProvider>
       </body>
     </html>
   );

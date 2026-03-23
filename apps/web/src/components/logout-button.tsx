@@ -1,6 +1,9 @@
 "use client";
 
 import { createClient } from "@/lib/supabase/client";
+import { LogOutIcon } from "lucide-react";
+import { Button } from "./ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 export default function LogoutButton() {
     const supabase = createClient();
@@ -10,5 +13,14 @@ export default function LogoutButton() {
         window.location.href = "/login";
     };
 
-    return <button className="bg-red-500 px-2 text-white rounded-sm cursor-pointer" onClick={logout}>Logout</button>;
+    return (<Tooltip>
+        <TooltipTrigger asChild>
+            <Button variant="ghost" size="icon-sm" onClick={logout}>
+                <LogOutIcon className="size-4" />
+            </Button>
+        </TooltipTrigger>
+        <TooltipContent>
+            <p>Logout</p>
+        </TooltipContent>
+    </Tooltip>);
 }
