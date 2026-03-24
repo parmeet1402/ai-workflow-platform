@@ -7,6 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { getMembershipForUser } from "@/lib/supabase/membership";
 import { createClient } from "@/lib/supabase/server";
 import { Toaster } from "sonner";
+import { AppThemeProvider } from "@/components/theme-provider";
 
 const inter = Inter({ subsets: ['latin'], variable: '--font-sans' });
 
@@ -46,20 +47,26 @@ export default async function RootLayout({
   }
 
   return (
-    <html lang="en" className={cn("font-sans", inter.variable)}>
+    <html
+      lang="en"
+      className={cn("font-sans", inter.variable, "dark")}
+      suppressHydrationWarning
+    >
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         <TooltipProvider>
-          <AuthProvider
-            initialUser={user}
-            initialOrganizationId={initialOrganizationId}
-            initialOrganizationName={initialOrganizationName}
-            initialRole={initialRole}
-          >
-            {children}
-            <Toaster richColors closeButton />
-          </AuthProvider>
+          <AppThemeProvider>
+            <AuthProvider
+              initialUser={user}
+              initialOrganizationId={initialOrganizationId}
+              initialOrganizationName={initialOrganizationName}
+              initialRole={initialRole}
+            >
+              {children}
+              <Toaster richColors closeButton />
+            </AuthProvider>
+          </AppThemeProvider>
         </TooltipProvider>
       </body>
     </html>

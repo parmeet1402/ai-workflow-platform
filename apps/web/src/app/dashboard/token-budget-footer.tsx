@@ -121,85 +121,88 @@ export default function TokenBudgetFooter({
   return (
     <Card>
       <CardContent className="flex items-center justify-between gap-6">
-        <div className="grid gap-1">
-          <div className="text-sm">
-            <span className="font-medium">Token Usage:</span>{" "}
-            {tokensUsed.toLocaleString()} / {tokenBudget.toLocaleString()}{" "}
-            tokens
-          </div>
-          <div className="text-sm text-muted-foreground">
-            <span className="font-medium text-foreground">Cost:</span>{" "}
-            {formatUsd(cost)}
-          </div>
-
-          <div className="mt-2 flex items-center gap-2">
+          <div className="grid gap-1">
             <div className="text-sm">
-              <span className="font-medium">Token Budget:</span>{" "}
-              {tokenBudget.toLocaleString()} tokens
+              <span className="font-medium">Token Usage:</span>{" "}
+              {tokensUsed.toLocaleString()} / {tokenBudget.toLocaleString()}{" "}
+              tokens
+            </div>
+            <div className="text-sm text-muted-foreground">
+              <span className="font-medium text-foreground">Cost:</span>{" "}
+              {formatUsd(cost)}
             </div>
 
-            <Dialog open={open} onOpenChange={setOpen}>
-              {/* We open the dialog via the pencil button */}
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => setOpen(true)}
-                aria-label="Edit token budget"
-              >
-                <Pencil className="size-4" />
-              </Button>
+            <div className="mt-2 flex items-center gap-2">
+              <div className="text-sm">
+                <span className="font-medium">Token Budget:</span>{" "}
+                {tokenBudget.toLocaleString()} tokens
+              </div>
 
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>Edit Token Budget</DialogTitle>
-                  <DialogDescription>
-                    Update your monthly/max token budget.
-                  </DialogDescription>
-                </DialogHeader>
-
-                <form
-                  onSubmit={handleSubmit(onSubmit)}
-                  className="grid gap-4"
+              <Dialog open={open} onOpenChange={setOpen}>
+                {/* We open the dialog via the pencil button */}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => setOpen(true)}
+                  aria-label="Edit token budget"
                 >
-                  <div className="grid gap-2">
-                    <label htmlFor="tokenBudget" className="text-sm font-medium">
-                      Token budget
-                    </label>
-                    <Input
-                      id="tokenBudget"
-                      type="number"
-                      inputMode="numeric"
-                      {...register("tokenBudget", { valueAsNumber: true })}
-                      aria-invalid={!!errors.tokenBudget}
-                    />
-                    {errors.tokenBudget?.message ? (
-                      <p className="text-sm text-red-600 dark:text-red-400">
-                        {errors.tokenBudget.message}
-                      </p>
-                    ) : null}
-                  </div>
+                  <Pencil className="size-4" />
+                </Button>
 
-                  <DialogFooter>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      onClick={() => setOpen(false)}
-                      disabled={isSubmitting}
-                    >
-                      Cancel
-                    </Button>
-                    <Button type="submit" disabled={isSubmitting}>
-                      Save
-                    </Button>
-                  </DialogFooter>
-                </form>
-              </DialogContent>
-            </Dialog>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Edit Token Budget</DialogTitle>
+                    <DialogDescription>
+                      Update your monthly/max token budget.
+                    </DialogDescription>
+                  </DialogHeader>
+
+                  <form
+                    onSubmit={handleSubmit(onSubmit)}
+                    className="grid gap-4"
+                  >
+                    <div className="grid gap-2">
+                      <label
+                        htmlFor="tokenBudget"
+                        className="text-sm font-medium"
+                      >
+                        Token budget
+                      </label>
+                      <Input
+                        id="tokenBudget"
+                        type="number"
+                        inputMode="numeric"
+                        {...register("tokenBudget", { valueAsNumber: true })}
+                        aria-invalid={!!errors.tokenBudget}
+                      />
+                      {errors.tokenBudget?.message ? (
+                        <p className="text-sm text-red-600 dark:text-red-400">
+                          {errors.tokenBudget.message}
+                        </p>
+                      ) : null}
+                    </div>
+
+                    <DialogFooter>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        onClick={() => setOpen(false)}
+                        disabled={isSubmitting}
+                      >
+                        Cancel
+                      </Button>
+                      <Button type="submit" disabled={isSubmitting}>
+                        Save
+                      </Button>
+                    </DialogFooter>
+                  </form>
+                </DialogContent>
+              </Dialog>
+            </div>
           </div>
-        </div>
 
-        <RadialUsageChart used={tokensUsed} budget={tokenBudget} />
+          <RadialUsageChart used={tokensUsed} budget={tokenBudget} />
       </CardContent>
     </Card>
   );

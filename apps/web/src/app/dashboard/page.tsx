@@ -1,4 +1,5 @@
 import LogoutButton from "@/components/logout-button";
+import ThemeToggleButton from "@/components/theme-toggle-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -31,6 +32,7 @@ export default async function Dashboard() {
 
                 <div className="flex items-center gap-3">
                     <Badge variant="secondary">{user.email}</Badge>
+                    <ThemeToggleButton />
 
                     <Tooltip>
                         <TooltipTrigger asChild>
