@@ -1,23 +1,23 @@
 # User authentication
 
-How **registration**, **login**, and **logout** work in this app: Supabase Auth, Next.js pages, and the email callback route.
+The user is able to **register**, **sign in**, and **sign out** using Supabase Auth, Next.js pages, and the `/auth/callback` route for email (and similar) exchanges. The session is stored in **cookies** that the browser Supabase client and the server client (`@supabase/ssr`) share, so API routes and Server Components see the same identity as the client.
 
-Diagrams use [Mermaid](https://mermaid.js.org/). **Legend:** purple = start or entry, amber = decision, slate = processing step, green = success path, red = error path, indigo panels = system boundaries.
+Diagrams use [Mermaid](https://mermaid.js.org/).
 
 ---
 
-## Source files
+## Implementation map
 
 | Topic | Path |
 |--------|------|
 | Sign up | `apps/web/src/app/sign-up/page.tsx` |
 | Log in | `apps/web/src/app/login/page.tsx` |
-| Email / OAuth callback | `apps/web/src/app/auth/callback/route.ts` |
+| Callback | `apps/web/src/app/auth/callback/route.ts` |
 | Log out | `apps/web/src/components/logout-button.tsx` |
-| Browser Supabase client | `apps/web/src/lib/supabase/client.ts` |
-| Server Supabase client (cookies) | `apps/web/src/lib/supabase/server.ts` |
-| Friendly error messages | `apps/web/src/lib/auth/supabase-errors.ts` |
-| Global auth state | `apps/web/src/app/layout.tsx`, `apps/web/src/features/auth/auth-context.tsx` |
+| Browser client | `apps/web/src/lib/supabase/client.ts` |
+| Server client | `apps/web/src/lib/supabase/server.ts` |
+| Auth error copy | `apps/web/src/lib/auth/supabase-errors.ts` |
+| Auth context | `apps/web/src/app/layout.tsx`, `apps/web/src/features/auth/auth-context.tsx` |
 
 ---
 
@@ -25,14 +25,12 @@ Diagrams use [Mermaid](https://mermaid.js.org/). **Legend:** purple = start or e
 
 | Variable | Role |
 |----------|------|
-| `NEXT_PUBLIC_SUPABASE_URL` | Project URL (browser + server) |
+| `NEXT_PUBLIC_SUPABASE_URL` | Project URL (browser and server) |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Publishable key for both clients |
 
 ---
 
-## How the session is shared
-
-Supabase stores the session in **cookies**. The **browser** client and the **server** client (`@supabase/ssr`) read and update the same cookies, so Route Handlers and Server Components see the same user as the client.
+## Session over cookies
 
 ```mermaid
 %%{init: {
@@ -48,87 +46,44 @@ Supabase stores the session in **cookies**. The **browser** client and the **ser
   "flowchart": { "curve": "basis", "padding": 16 }
 }}%%
 flowchart TB
-  subgraph Client[" 🖥 Browser "]
+  subgraph Client["Browser"]
     direction TB
     P1["Pages: /login, /sign-up, /dashboard"]
     BC["Supabase browser client"]
   end
 
-  subgraph Server[" ⚙ Next.js server "]
+  subgraph Server["Next.js server"]
     direction TB
-    P2["Server Components + API routes"]
+    P2["Server Components and API routes"]
     SC["Supabase server client"]
   end
 
-  subgraph Remote[" ☁ Supabase Auth "]
+  subgraph Remote["Supabase Auth"]
     AUTH["Auth service"]
   end
 
   P1 <--> BC
   P2 <--> SC
-  BC <-->|"HTTPS"| AUTH
-  SC <-->|"HTTPS"| AUTH
-  BC <-.->|"shared session cookies"| SC
+  BC <-->|HTTPS| AUTH
+  SC <-->|HTTPS| AUTH
+  BC <-.->|shared session cookies| SC
 
   style Client fill:#eef2ff,stroke:#6366f1,stroke-width:2px
   style Server fill:#ecfdf5,stroke:#10b981,stroke-width:2px
   style Remote fill:#fff7ed,stroke:#ea580c,stroke-width:2px
 ```
 
-The dotted line means: both clients rely on the **same cookie jar** so the session is one logical login.
+The dotted edge indicates that both clients read and write the **same cookie jar**, so one logical session applies across client and server.
 
 ---
 
-## Registration (sign up)
+## Registration
 
 **Route:** `/sign-up`
 
-1. User enters **name**, **email**, **password**.
-2. **Zod** validates on the client.
-3. App calls `supabase.auth.signUp` with:
-   - `emailRedirectTo: {origin}/auth/callback`
-   - `data: { full_name: name }`
+The user is able to create an account by submitting **name**, **email**, and **password**. The form is validated with **Zod** on the client. The app calls `supabase.auth.signUp` with `emailRedirectTo` set to `{origin}/auth/callback` and `data: { full_name: name }`. Whether **email confirmation** is required before sign-in is configured in the Supabase dashboard, not in this repository.
 
-Whether the user **must confirm email** before signing in is set in the **Supabase dashboard** (Auth), not in this repo.
-
-### Diagram A — What happens on the sign-up page
-
-```mermaid
-%%{init: { "theme": "base", "flowchart": { "curve": "basis", "padding": 14 }, "themeVariables": { "fontFamily": "ui-sans-serif, system-ui, sans-serif" }}}%%
-flowchart TD
-  classDef startEnd fill:#6366f1,stroke:#4338ca,color:#fff,stroke-width:2px
-  classDef decision fill:#fcd34d,stroke:#d97706,color:#422006,stroke-width:2px
-  classDef process fill:#f1f5f9,stroke:#64748b,color:#0f172a
-  classDef success fill:#34d399,stroke:#059669,color:#064e3b,stroke-width:2px
-  classDef error fill:#f87171,stroke:#b91c1c,color:#fff,stroke-width:2px
-  classDef api fill:#c7d2fe,stroke:#4f46e5,color:#1e1b4b
-
-  S([Start: open /sign-up]):::startEnd --> F[Fill name, email, password]:::process
-  F --> V{Zod valid?}:::decision
-  V -->|fix form| F
-  V -->|valid| U["signUp(...)"]:::api
-  U --> R{Supabase response}:::decision
-  R -->|error| T[Toast: getAuthErrorMessage]:::error
-  R -->|success| M[Toast: check email / success]:::success
-```
-
-### Diagram B — After sign-up: email confirmation (when enabled)
-
-```mermaid
-%%{init: { "theme": "base", "flowchart": { "curve": "basis", "padding": 14 }, "themeVariables": { "fontFamily": "ui-sans-serif, system-ui, sans-serif" }}}%%
-flowchart TD
-  classDef startEnd fill:#6366f1,stroke:#4338ca,color:#fff,stroke-width:2px
-  classDef process fill:#f1f5f9,stroke:#64748b,color:#0f172a
-  classDef server fill:#a5b4fc,stroke:#4338ca,color:#1e1b4b
-  classDef success fill:#34d399,stroke:#059669,color:#064e3b,stroke-width:2px
-
-  E([Email arrives]):::startEnd --> L[User clicks verify link]:::process
-  L --> C["GET /auth/callback?code=…"]:::process
-  C --> X["exchangeCodeForSession(code)"]:::server
-  X --> D([Redirect /dashboard]):::success
-```
-
-### Sequence — Sign-up and callback (end to end)
+After the user completes verification (when enabled), `GET /auth/callback` exchanges the code for a session and redirects to `/dashboard`. The root layout loads the current user on the server and passes membership into `AuthProvider`, which enables organization-scoped features (for example documents).
 
 ```mermaid
 %%{init: {
@@ -159,17 +114,13 @@ sequenceDiagram
   else Success
     Auth-->>Page: OK
     Page-->>User: Success toast
-    Auth->>Email: Verification email optional
+    Auth->>Email: Verification email when enabled
     User->>Email: Open link
-    Email->>Route: GET ?code=
+    Email->>Route: GET with code
     Route->>Auth: exchangeCodeForSession
     Route-->>User: Redirect /dashboard
   end
 ```
-
-### Session and org after login
-
-The root layout loads the current user on the server and passes membership into `AuthProvider`. That powers org-scoped features (for example documents), not the auth forms themselves.
 
 ---
 
@@ -177,36 +128,7 @@ The root layout loads the current user on the server and passes membership into 
 
 **Route:** `/login`
 
-1. **Zod** validates email and password.
-2. `supabase.auth.signInWithPassword({ email, password })`.
-3. On success: success toast, then **`window.location.href = "/dashboard"`** (full page load so server and client agree on cookies).
-
-### Diagram — Login flow
-
-```mermaid
-%%{init: { "theme": "base", "flowchart": { "curve": "basis", "padding": 14 }, "themeVariables": { "fontFamily": "ui-sans-serif, system-ui, sans-serif" }}}%%
-flowchart TD
-  classDef startEnd fill:#6366f1,stroke:#4338ca,color:#fff,stroke-width:2px
-  classDef decision fill:#fcd34d,stroke:#d97706,color:#422006,stroke-width:2px
-  classDef process fill:#f1f5f9,stroke:#64748b,color:#0f172a
-  classDef api fill:#c7d2fe,stroke:#4f46e5,color:#1e1b4b
-  classDef success fill:#34d399,stroke:#059669,color:#064e3b,stroke-width:2px
-  classDef error fill:#f87171,stroke:#b91c1c,color:#fff,stroke-width:2px
-  classDef warn fill:#fb923c,stroke:#c2410c,color:#fff
-
-  L([User on /login]):::startEnd --> V{Zod valid?}:::decision
-  V -->|no| L
-  V -->|yes| SI[signInWithPassword]:::api
-  SI --> E{Result}:::decision
-  E -->|error| TE[Toast: getAuthErrorMessage]:::error
-  E -->|ok| RD[Full navigation → /dashboard]:::process
-  RD --> DB[Dashboard: getUser on server]:::process
-  DB --> G{User exists?}:::decision
-  G -->|no| RL[redirect /login]:::warn
-  G -->|yes| OK[Show dashboard]:::success
-```
-
-### Sequence — Login
+The user is able to sign in with **email** and **password** after **Zod** validation. The app calls `supabase.auth.signInWithPassword`. On success, a toast is shown and the browser navigates to **`/dashboard`** with a full page load so cookies are consistent for the next server render. The dashboard page calls `getUser()` and redirects to `/login` when there is no user. Helpers for middleware-style redirects live in `apps/web/src/proxy.ts` but are **not** imported from a root `middleware.ts` in the current tree.
 
 ```mermaid
 %%{init: {
@@ -237,31 +159,11 @@ sequenceDiagram
   end
 ```
 
-### Middleware note
-
-`apps/web/src/proxy.ts` contains logic suitable for **Next.js middleware** (for example redirecting logged-in users away from `/login`). **No `middleware.ts` imports it today.** The dashboard is protected by calling `getUser()` in the dashboard page and `redirect("/login")` if there is no user.
-
 ---
 
 ## Logout
 
-**Component:** `LogoutButton` on the dashboard.
-
-1. `supabase.auth.signOut()`
-2. `window.location.href = "/login"`
-
-```mermaid
-%%{init: { "theme": "base", "flowchart": { "curve": "linear", "padding": 20 }, "themeVariables": { "fontFamily": "ui-sans-serif, system-ui, sans-serif" }}}%%
-flowchart LR
-  classDef startEnd fill:#6366f1,stroke:#4338ca,color:#fff,stroke-width:2px
-  classDef process fill:#f1f5f9,stroke:#64748b,color:#0f172a
-  classDef api fill:#c7d2fe,stroke:#4f46e5,color:#1e1b4b
-  classDef success fill:#34d399,stroke:#059669,color:#064e3b,stroke-width:2px
-
-  A([Click logout]):::startEnd --> B[signOut]:::api
-  B --> C[Session cleared]:::process
-  C --> D([Open /login]):::success
-```
+The user is able to sign out from the dashboard via **`LogoutButton`**. The component calls `supabase.auth.signOut()` and then navigates to **`/login`**.
 
 ```mermaid
 %%{init: {
@@ -291,21 +193,21 @@ sequenceDiagram
 ## Quick reference
 
 | Action | Where it happens |
-|--------|-------------------|
-| Register | Client: `/sign-up` → `signUp` |
-| Confirm email | Server: `GET /auth/callback` → `exchangeCodeForSession` → redirect `/dashboard` |
-| Log in | Client: `/login` → `signInWithPassword` → `/dashboard` |
-| Log out | Client: `signOut` → `/login` |
+|--------|------------------|
+| Register | `/sign-up` → `signUp` |
+| Confirm email | `GET /auth/callback` → `exchangeCodeForSession` → `/dashboard` |
+| Log in | `/login` → `signInWithPassword` → `/dashboard` |
+| Log out | `signOut` → `/login` |
 
 ---
 
-## Supabase checklist (auth)
+## Supabase checklist
 
-- Set **Site URL** and **Redirect URLs** to include your app origin and `/auth/callback`.
-- Match **email confirmation** settings to the UX you want (required vs optional).
+- **Site URL** and **Redirect URLs** include the app origin and `/auth/callback`.
+- **Email confirmation** matches the intended UX (required vs optional).
 
 ---
 
 ## See also
 
-- [Document management](document-management.md) — org-scoped PDF list, upload, and open (uses the same session).
+- [Document management](document-management.md) — organization-scoped PDFs using the same session.

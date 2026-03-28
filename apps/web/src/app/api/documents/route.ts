@@ -43,7 +43,14 @@ export async function GET() {
             );
         }
 
-        return NextResponse.json({ documents: documents ?? [] });
+        return NextResponse.json(
+            { documents: documents ?? [] },
+            {
+                headers: {
+                    "Cache-Control": "private, no-store, max-age=0",
+                },
+            },
+        );
     } catch (error) {
         console.error("Error listing documents", error);
         return NextResponse.json(

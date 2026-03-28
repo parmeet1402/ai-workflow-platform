@@ -71,7 +71,10 @@ export default function DashboardDocuments() {
   } = useQuery({
     queryKey: ["documents"],
     queryFn: async (): Promise<DocumentRow[]> => {
-      const res = await fetch("/api/documents", { credentials: "include" });
+      const res = await fetch("/api/documents", {
+        credentials: "include",
+        cache: "no-store",
+      });
       const payload = (await res.json()) as
         | { documents: DocumentRow[] }
         | { error: string };
@@ -157,14 +160,34 @@ export default function DashboardDocuments() {
     uploadMutation.mutate(values.files);
   };
 
-  const handleDeleteDocument = (id: string) => {
-    queryClient.setQueryData<DocumentRow[]>(["documents"], (prev) =>
-      (prev ?? []).filter((doc) => doc.id !== id),
-    );
-    toast.success("Removed from list", {
-      description: "This only updates the UI until a delete API exists.",
-    });
-  };
+  const deleteMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await fetch(`/api/documents/${id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      const data = (await res.json()) as { success?: boolean; error?: string };
+
+      if (!res.ok) {
+        throw new Error(data.error ?? "Failed to delete document");
+      }
+      if (!data.success) {
+        throw new Error(data.error ?? "Failed to delete document");
+      }
+    },
+    onSuccess: (_, deletedId) => {
+      queryClient.setQueryData<DocumentRow[]>(["documents"], (prev) =>
+        (prev ?? []).filter((doc) => doc.id !== deletedId),
+      );
+      toast.success("Document deleted");
+      void queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onError: (err) => {
+      toast.error("Delete failed", {
+        description: err instanceof Error ? err.message : "Unknown error.",
+      });
+    },
+  });
 
   return (
     <section className="h-full min-h-0 flex flex-col gap-4">
@@ -270,11 +293,15 @@ export default function DashboardDocuments() {
                         variant="ghost"
                         size="icon-sm"
                         className="shrink-0"
+                        disabled={
+                          deleteMutation.isPending &&
+                          deleteMutation.variables === doc.id
+                        }
                         aria-label={`Remove ${doc.name} from list`}
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
-                          handleDeleteDocument(doc.id);
+                          deleteMutation.mutate(doc.id);
                         }}
                       >
                         <XIcon className="size-4" />
