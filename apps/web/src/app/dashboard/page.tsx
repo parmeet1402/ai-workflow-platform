@@ -36,7 +36,11 @@ export default async function Dashboard() {
 
                     <Tooltip>
                         <TooltipTrigger asChild>
-                            <Button variant="ghost" size="icon-sm" aria-label="Settings">
+                            <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                aria-label="Settings"
+                            >
                                 <SettingsIcon className="size-4" />
                             </Button>
                         </TooltipTrigger>

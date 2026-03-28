@@ -8,6 +8,7 @@ import { getMembershipForUser } from "@/lib/supabase/membership";
 import { createClient } from "@/lib/supabase/server";
 import { Toaster } from "sonner";
 import { AppThemeProvider } from "@/components/theme-provider";
+import { ReactQueryProvider } from "@/components/react-query-provider";
 
 const inter = Inter({ subsets: ['latin'], variable: '--font-sans' });
 
@@ -63,7 +64,7 @@ export default async function RootLayout({
               initialOrganizationName={initialOrganizationName}
               initialRole={initialRole}
             >
-              {children}
+              <ReactQueryProvider>{children}</ReactQueryProvider>
               <Toaster richColors closeButton />
             </AuthProvider>
           </AppThemeProvider>
