@@ -51,6 +51,7 @@ function startHealthServer(): Promise<http.Server> {
       console.log(
         JSON.stringify({
           stage: "health_listen",
+          message: `HTTP health server listening on port ${port}`,
           port,
           envPort: process.env.PORT ?? null,
         }),
@@ -62,7 +63,13 @@ function startHealthServer(): Promise<http.Server> {
 
 async function main() {
   // stdout so hosts (e.g. Railway) don’t tag normal startup as [err] (stderr)
-  console.log(JSON.stringify({ stage: "boot", pid: process.pid }));
+  console.log(
+    JSON.stringify({
+      stage: "boot",
+      message: "document-worker process started",
+      pid: process.pid,
+    }),
+  );
   const healthServer = await startHealthServer();
 
   const { loadConfig } = await import("./config.js");
@@ -111,12 +118,14 @@ async function main() {
         code === "ECONNRESET" || code === "EPIPE" || code === "ETIMEDOUT";
       if (transient) {
         const now = Date.now();
-        if (now - lastTransientRedisLog > 30_000) {
+        // Managed Redis often resets long-lived TCP; log at most once per interval to avoid noise
+        if (now - lastTransientRedisLog > 120_000) {
           lastTransientRedisLog = now;
-          // stdout: normal on managed Redis; ioredis reconnects (stderr would show as deploy “errors”)
           console.log(
             JSON.stringify({
               stage: "redis_transient_disconnect",
+              message:
+                "Redis TCP reset (expected on some hosts); client will reconnect",
               code: code ?? err.message,
             }),
           );
@@ -142,6 +151,7 @@ async function main() {
   console.log(
     JSON.stringify({
       stage: "startup",
+      message: "Worker ready; consuming ingest queue",
       workerConcurrency: n,
       embeddingModel: config.embeddingModel,
       embeddingDimensions: config.embeddingDimensions,
