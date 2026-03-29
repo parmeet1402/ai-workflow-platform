@@ -1,15 +1,11 @@
 /**
  * Document ingest queue consumer: CAS claim, PDF extract, chunk, embed, transactional PG write.
+ *
+ * Keep static imports minimal: anything that loads before `startHealthServer()` resolves
+ * can prevent Railway's HTTP healthcheck from ever seeing an open PORT.
  */
 import "dotenv/config";
 import http from "node:http";
-import OpenAI from "openai";
-import { Redis } from "ioredis";
-
-import { loadConfig } from "./config.js";
-import { runIngestConsumerLoop } from "./consumer.js";
-import { runDocumentIngest } from "./processor/run-document-ingest.js";
-import { createSupabaseAdmin } from "./supabase/admin.js";
 
 function requireRedisUrl(): string {
   const v = process.env.UPSTASH_REDIS_URL?.trim();
@@ -33,22 +29,12 @@ function httpListenPort(): number {
   return n;
 }
 
-/** Railway injects PORT; the process must listen before HTTP health checks pass. */
+/** Railway injects PORT; bind before loading OpenAI/ioredis/consumer so probes can succeed. */
 function startHealthServer(): Promise<http.Server> {
   const port = httpListenPort();
   const server = http.createServer((req, res) => {
-    let pathOnly = req.url?.split("?")[0] ?? "";
-    if (pathOnly.length > 1 && pathOnly.endsWith("/")) {
-      pathOnly = pathOnly.slice(0, -1);
-    }
-    const ok =
-      pathOnly === "/" ||
-      pathOnly === "/health" ||
-      pathOnly === "/healthz";
-    if (
-      ok &&
-      (req.method === "GET" || req.method === "HEAD")
-    ) {
+    // Single-purpose probe server: any GET/HEAD returns 200 (avoids path/proxy mismatches).
+    if (req.method === "GET" || req.method === "HEAD") {
       res.writeHead(200, { "Content-Type": "text/plain" });
       if (req.method === "GET") res.end("ok");
       else res.end();
@@ -59,13 +45,13 @@ function startHealthServer(): Promise<http.Server> {
   });
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(port, "0.0.0.0", () => {
+    // Omit host to use Node's default dual-stack bind (IPv4 + IPv6 where supported).
+    server.listen(port, () => {
       server.removeListener("error", reject);
       console.log(
         JSON.stringify({
           stage: "health_listen",
           port,
-          bind: "0.0.0.0",
           envPort: process.env.PORT ?? null,
         }),
       );
@@ -75,9 +61,17 @@ function startHealthServer(): Promise<http.Server> {
 }
 
 async function main() {
-  // Bind PORT before config validation so Railway HTTP healthchecks can succeed even if
-  // env is still wrong (you'll see Zod errors in logs and a restart until vars are set).
+  console.error("[document-worker] boot pid=", process.pid);
   const healthServer = await startHealthServer();
+
+  const { loadConfig } = await import("./config.js");
+  const { default: OpenAI } = await import("openai");
+  const { Redis } = await import("ioredis");
+  const { runIngestConsumerLoop } = await import("./consumer.js");
+  const { runDocumentIngest } = await import(
+    "./processor/run-document-ingest.js"
+  );
+  const { createSupabaseAdmin } = await import("./supabase/admin.js");
 
   let config;
   try {
@@ -104,7 +98,6 @@ async function main() {
       new Redis(redisUrl, {
         maxRetriesPerRequest: null,
         enableReadyCheck: false,
-        // Helps some networks keep the TLS/TCP session from looking fully idle.
         keepAlive: 10_000,
       }),
   );
