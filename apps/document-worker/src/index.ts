@@ -112,7 +112,8 @@ async function main() {
         const now = Date.now();
         if (now - lastTransientRedisLog > 30_000) {
           lastTransientRedisLog = now;
-          console.error(
+          // warn: normal on Upstash / long TLS hops; ioredis reconnects automatically
+          console.warn(
             "[document-worker] Redis connection dropped (reconnecting):",
             code ?? err.message,
           );
