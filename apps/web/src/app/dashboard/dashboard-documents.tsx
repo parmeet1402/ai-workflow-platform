@@ -1,13 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { FileText, XIcon } from "lucide-react";
+import { FileText, Loader2, XIcon } from "lucide-react";
 import { toast } from "sonner";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Controller, useForm } from "react-hook-form";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -16,17 +17,9 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import type { DocumentListItem, ProcessingStatus } from "@/types/document";
 
-type DocumentRow = {
-  id: string;
-  name: string;
-  storage_path: string;
-  user_id?: string;
-  organization_id?: string;
-  created_at?: string | null;
-};
-
-function documentSubtitle(doc: DocumentRow): string {
+function documentSubtitle(doc: DocumentListItem): string {
   if (doc.created_at) {
     try {
       return new Date(doc.created_at).toLocaleString();
@@ -35,6 +28,60 @@ function documentSubtitle(doc: DocumentRow): string {
     }
   }
   return doc.storage_path;
+}
+
+function processingBadgeLabel(status: ProcessingStatus): string {
+  switch (status) {
+    case "pending":
+      return "Pending";
+    case "processing":
+      return "Processing";
+    case "ready":
+      return "Ready";
+    case "failed":
+      return "Failed";
+    default:
+      return status;
+  }
+}
+
+function ProcessingStatusBadge({ status }: { status: ProcessingStatus }) {
+  const label = processingBadgeLabel(status);
+  if (status === "processing") {
+    return (
+      <Badge variant="default" className="shrink-0 gap-1">
+        <Loader2 className="size-3 animate-spin" aria-hidden />
+        {label}
+      </Badge>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <Badge variant="destructive" className="shrink-0">
+        {label}
+      </Badge>
+    );
+  }
+  if (status === "ready") {
+    return (
+      <Badge variant="secondary" className="shrink-0">
+        {label}
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="outline" className="shrink-0">
+      {label}
+    </Badge>
+  );
+}
+
+function listNeedsPolling(docs: DocumentListItem[] | undefined): boolean {
+  if (!docs?.length) return false;
+  return docs.some(
+    (d) =>
+      d.processing_status === "pending" || d.processing_status === "processing",
+  );
 }
 
 type UploadFormValues = { files: File[] };
@@ -52,11 +99,10 @@ const UploadSchema = z.object({
   files: FileArraySchema,
 });
 
-type UploadDocumentFromApi = {
-  id: string;
-  name: string;
-  storage_path: string;
-};
+type UploadDocumentFromApi = Pick<
+  DocumentListItem,
+  "id" | "name" | "storage_path" | "processing_status"
+>;
 
 export default function DashboardDocuments() {
   const queryClient = useQueryClient();
@@ -70,13 +116,13 @@ export default function DashboardDocuments() {
     error: documentsErrorObj,
   } = useQuery({
     queryKey: ["documents"],
-    queryFn: async (): Promise<DocumentRow[]> => {
+    queryFn: async (): Promise<DocumentListItem[]> => {
       const res = await fetch("/api/documents", {
         credentials: "include",
         cache: "no-store",
       });
       const payload = (await res.json()) as
-        | { documents: DocumentRow[] }
+        | { documents: DocumentListItem[] }
         | { error: string };
 
       if (!res.ok) {
@@ -89,6 +135,10 @@ export default function DashboardDocuments() {
       }
       return payload.documents;
     },
+    refetchInterval: (query) =>
+      listNeedsPolling(query.state.data as DocumentListItem[] | undefined)
+        ? 4000
+        : false,
   });
 
   const {
@@ -176,7 +226,7 @@ export default function DashboardDocuments() {
       }
     },
     onSuccess: (_, deletedId) => {
-      queryClient.setQueryData<DocumentRow[]>(["documents"], (prev) =>
+      queryClient.setQueryData<DocumentListItem[]>(["documents"], (prev) =>
         (prev ?? []).filter((doc) => doc.id !== deletedId),
       );
       toast.success("Document deleted");
@@ -273,19 +323,35 @@ export default function DashboardDocuments() {
                 {documents.map((doc) => (
                   <li
                     key={doc.id}
-                    className="h-20 rounded-lg border bg-background px-3 py-2 transition-colors hover:bg-muted/50 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:ring-offset-background"
+                    className="min-h-20 rounded-lg border bg-background px-3 py-2 transition-colors hover:bg-muted/50 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 focus-within:ring-offset-background"
                   >
-                    <div className="flex h-full items-start justify-between gap-2">
+                    <div className="flex min-h-14 items-start justify-between gap-2">
                       <a
                         href={`/api/documents/${doc.id}/open`}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="min-w-0 flex-1 rounded-md outline-none transition-colors"
                       >
-                        <div className="truncate text-sm font-medium">{doc.name}</div>
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <span className="truncate text-sm font-medium">
+                            {doc.name}
+                          </span>
+                          <ProcessingStatusBadge
+                            status={doc.processing_status ?? "pending"}
+                          />
+                        </div>
                         <div className="truncate text-sm text-muted-foreground">
                           {documentSubtitle(doc)}
                         </div>
+                        {doc.processing_status === "failed" &&
+                        doc.processing_error ? (
+                          <p
+                            className="mt-1 line-clamp-2 text-xs text-destructive/90"
+                            title={doc.processing_error}
+                          >
+                            {doc.processing_error}
+                          </p>
+                        ) : null}
                       </a>
 
                       <Button

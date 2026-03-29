@@ -11,6 +11,7 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | Topic | Path |
 |--------|------|
 | Dashboard UI | `apps/web/src/app/dashboard/dashboard-documents.tsx` |
+| Document list types | `apps/web/src/types/document.ts` |
 | List | `apps/web/src/app/api/documents/route.ts` |
 | Upload | `apps/web/src/app/api/documents/upload/route.ts` |
 | Delete | `apps/web/src/app/api/documents/[documentId]/route.ts` |
@@ -130,7 +131,9 @@ erDiagram
 
 The user is able to see a list of documents for their organization. The dashboard loads it with TanStack Query (`["documents"]`) via `GET /api/documents` and `credentials: "include"`. The handler calls `getUser()`, loads a `memberships` row, selects from **`documents`** by `organization_id`, ordered by `created_at` descending. Successful responses include `Cache-Control: private, no-store, max-age=0`.
 
-**Response body:** `{ documents: [{ id, name, storage_path, user_id, organization_id, created_at }, ...] }`
+**Response body:** `{ documents: [{ id, name, storage_path, user_id, organization_id, created_at, processing_status, processing_error, processed_at }, ...] }`
+
+`processing_status` is one of `pending`, `processing`, `ready`, `failed`. The dashboard polls the list every few seconds while any document is `pending` or `processing`.
 
 ```mermaid
 %%{init: {
@@ -313,8 +316,15 @@ sequenceDiagram
 - A Storage bucket named **`documents`** allows org-scoped uploads and removal where the API requires it.
 - **`SUPABASE_SERVICE_ROLE_KEY`** is set only in the server environment (for example the web app) when policies prevent user JWTs from signing URLs or completing deletes.
 
+### Timestamps (UTC, without time zone)
+
+- Instants in the backend use PostgreSQL **`timestamp without time zone`**. Offsets are not stored on the column; **all values are treated as UTC** by convention.
+- The Supabase **database `TimeZone`** is set to **`UTC`**, and Node workers use **`TZ=UTC`**, so `now()` and defaults write UTC wall-clock values into those columns.
+- API routes in this repository do not construct timestamps manually today; they rely on Postgres. See [Document ingest pipeline](document-ingest-pipeline.md) for ingest fields, the planned enqueue payload, and the full convention.
+
 ---
 
 ## See also
 
 - [User authentication](authentication.md) — how the session cookie is created; document APIs require it.
+- [Document ingest pipeline](document-ingest-pipeline.md) — planned queue, worker, embeddings, and UTC conventions.
