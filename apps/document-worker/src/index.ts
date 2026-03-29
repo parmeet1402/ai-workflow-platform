@@ -61,7 +61,8 @@ function startHealthServer(): Promise<http.Server> {
 }
 
 async function main() {
-  console.error("[document-worker] boot pid=", process.pid);
+  // stdout so hosts (e.g. Railway) don’t tag normal startup as [err] (stderr)
+  console.log(JSON.stringify({ stage: "boot", pid: process.pid }));
   const healthServer = await startHealthServer();
 
   const { loadConfig } = await import("./config.js");
@@ -112,10 +113,12 @@ async function main() {
         const now = Date.now();
         if (now - lastTransientRedisLog > 30_000) {
           lastTransientRedisLog = now;
-          // warn: normal on Upstash / long TLS hops; ioredis reconnects automatically
-          console.warn(
-            "[document-worker] Redis connection dropped (reconnecting):",
-            code ?? err.message,
+          // stdout: normal on managed Redis; ioredis reconnects (stderr would show as deploy “errors”)
+          console.log(
+            JSON.stringify({
+              stage: "redis_transient_disconnect",
+              code: code ?? err.message,
+            }),
           );
         }
         return;
