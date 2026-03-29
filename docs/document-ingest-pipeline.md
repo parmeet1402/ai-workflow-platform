@@ -18,26 +18,68 @@ Related material: [Document management](document-management.md) (current list/up
 
 ## Architecture (high level)
 
-```text
-Browser (dashboard)
-        │
-        ▼
-Next.js API routes (any host: Vercel, Railway, …)
-        │
-        ├──────────────────────────────┐
-        ▼                              ▼
-Supabase                           Upstash Redis
-Auth · Postgres · Storage           list: queue:ingest
-        │                              │
-        │                              ▼
-        │                        Worker (Railway / Render)
-        │                              │
-        └──────────────────────────────┴──► Postgres + Storage read + OpenAI embeddings
+```mermaid
+%%{init: {
+  "theme": "base",
+  "flowchart": { "curve": "basis", "padding": 18 },
+  "themeVariables": {
+    "fontFamily": "ui-sans-serif, system-ui, sans-serif",
+    "lineColor": "#64748b"
+  }
+}}%%
+flowchart TB
+  subgraph clientLayer [Browser]
+    Dash[Dashboard]
+  end
+
+  subgraph nextApi [Next.js API routes]
+    Upload[POST upload]
+    Reconcile[GET reconcile-ingest]
+  end
+
+  subgraph scheduler [Optional scheduler]
+    CronJob[Vercel Cron or external]
+  end
+
+  subgraph supa [Supabase]
+    PgDocs[(Postgres documents)]
+    Storage[[Storage PDFs]]
+  end
+
+  subgraph upstash [Upstash Redis]
+    IngestQueue[queue:ingest]
+  end
+
+  subgraph workerHost [Worker host]
+    IngestWorker[Ingest worker]
+    OpenAI[OpenAI API]
+  end
+
+  Dash --> Upload
+  Upload --> Storage
+  Upload --> PgDocs
+  Upload --> IngestQueue
+  CronJob --> Reconcile
+  Reconcile --> PgDocs
+  Reconcile --> IngestQueue
+  IngestQueue --> IngestWorker
+  IngestWorker --> Storage
+  IngestWorker --> PgDocs
+  IngestWorker --> OpenAI
+
+  style clientLayer fill:#eef2ff,stroke:#6366f1,stroke-width:2px
+  style nextApi fill:#ecfdf5,stroke:#10b981,stroke-width:2px
+  style scheduler fill:#fef3c7,stroke:#ca8a04,stroke-width:2px
+  style supa fill:#fff7ed,stroke:#ea580c,stroke-width:2px
+  style upstash fill:#fce7f3,stroke:#db2777,stroke-width:2px
+  style workerHost fill:#f0fdf4,stroke:#16a34a,stroke-width:2px
 ```
 
-- The **web app** authenticates the user, uploads bytes to Storage, inserts a **`documents`** row, and **RPUSH**es a small JSON job to Redis.
-- The **worker** uses the **Supabase service role** and a **Redis protocol** client (e.g. `BRPOP`), loads the row by `documentId`, runs the pipeline, and writes chunks and status.
-- **OpenAI** is invoked **only from the worker** (`OPENAI_API_KEY` does not belong in the browser or in public environment variables).
+**Paths**
+
+- **Upload (primary):** the web app authenticates the user, uploads bytes to Storage, inserts a **`documents`** row, and **RPUSH**es a small JSON job to **`queue:ingest`**.
+- **Reconcile (optional recovery):** a **cron** (or any scheduler) calls **`GET /api/cron/reconcile-ingest`** with **`CRON_SECRET`**. The handler reads **stale `pending`** rows in Postgres and **RPUSH**es again so work is not lost if the first enqueue failed after insert.
+- **Worker:** consumes **`queue:ingest`** (e.g. `BRPOP` / `BLPOP`), loads the row by `documentId`, runs the pipeline, writes chunks and status, and calls **OpenAI** for embeddings (`OPENAI_API_KEY` stays on the worker only).
 
 ---
 
@@ -126,9 +168,35 @@ Baseline tables: `organizations`, `memberships`, `profiles`, `documents`, `docum
 | `GET /api/documents` | The `select` list includes `processing_status`, `processing_error`, and `processed_at` for UI badges. |
 | `DELETE /api/documents/:id` | Behavior matches the current flow; chunks are removed via **`ON DELETE CASCADE`** after migration. |
 | `GET /api/documents/:id/open` | Unchanged. |
-| Optional `GET /api/cron/reconcile-ingest` | Vercel Cron with `CRON_SECRET`: stale `pending` rows are found and re-enqueued; a short Redis lock per `documentId` limits duplication. |
+| Optional `GET /api/cron/reconcile-ingest` | See [Reconcile cron job](#reconcile-cron-job-optional) below. |
 
 Relevant paths: `apps/web/src/app/api/documents/**`; an enqueue helper belongs under `apps/web/src/lib/queue/`.
+
+---
+
+## Reconcile cron job (optional)
+
+### Purpose
+
+The normal path is: **upload** → insert into **`documents`** (status **`pending`**) → **RPUSH** to `queue:ingest` (with retries). If the database insert succeeds but **every enqueue attempt fails** (transient Upstash error, misconfiguration, etc.), the row remains **`pending`** and **no job exists in Redis**, so the worker never sees it.
+
+The **reconcile** flow fixes that gap: a scheduled or manual **`GET /api/cron/reconcile-ingest`** selects **`pending`** rows older than a threshold (**`minAgeMinutes`**, default **5**) and **RPUSH**es the same payload shape again. A short **Redis lock** per `documentId` reduces duplicate messages when several schedulers overlap.
+
+### What it is not
+
+- **Not required** for the happy path when upload enqueue succeeds.
+- **Not** a substitute for the worker; it only **refills the queue** for stuck rows.
+- **Vercel Cron** (via [`apps/web/vercel.json`](../apps/web/vercel.json)) is one way to call the route on a schedule (**once per day at 00:00 UTC**); it is optional if the app is hosted elsewhere or cron is not used yet. Change the `schedule` expression in `vercel.json` to adjust timing.
+
+### How it is secured and configured
+
+- **Authentication:** `Authorization: Bearer <CRON_SECRET>`. Set **`CRON_SECRET`** in the deployment environment (Vercel project env, etc.).
+- **Also required on the server:** **`SUPABASE_SERVICE_ROLE_KEY`** (service-role query across orgs) and **Upstash** env vars so locks and **RPUSH** work.
+- **Query:** `GET /api/cron/reconcile-ingest?minAgeMinutes=5` — only rows with **`created_at`** before the cutoff are considered.
+
+### Alternatives to Vercel Cron
+
+Any scheduler that issues an HTTP **GET** with the bearer secret (Railway cron, Render cron, GitHub Actions, external uptime monitors, manual **`curl`**) can replace Vercel’s cron. The route implementation does not depend on Vercel-specific headers.
 
 ---
 
@@ -151,7 +219,7 @@ Implementation file: `apps/web/src/app/dashboard/dashboard-documents.tsx`.
 | `SUPABASE_SERVICE_ROLE_KEY` | Optional; Storage and database when the user JWT is insufficient |
 | `UPSTASH_REDIS_REST_URL` | Redis REST (enqueue from serverless) |
 | `UPSTASH_REDIS_REST_TOKEN` | Must not use the `NEXT_PUBLIC_` prefix |
-| `CRON_SECRET` | Optional; bearer token for the reconcile route |
+| `CRON_SECRET` | Optional; bearer token for `GET /api/cron/reconcile-ingest` (see [Reconcile cron job](#reconcile-cron-job-optional)) |
 
 `OPENAI_API_KEY` is not set on the web tier when only the worker performs embedding calls.
 

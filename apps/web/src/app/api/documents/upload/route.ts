@@ -1,7 +1,14 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { utcIsoNow } from "@/lib/datetime";
+import { createDocumentIngestPayload } from "@/lib/queue/document-ingest-payload";
+import { enqueueDocumentIngest } from "@/lib/queue/enqueue-document-ingest";
 import { v4 as uuidv4 } from "uuid";
 
+/**
+ * PDF upload: Storage + DB row, then enqueue a background-ingest job to Redis (Upstash).
+ * Heavy work (extract, chunk, embed) runs in a separate worker process, not in this request.
+ */
 export async function POST(request: Request) {
     try {
         // 0. create supabase client
@@ -56,8 +63,9 @@ export async function POST(request: Request) {
 
         const fileBuffer = await file.arrayBuffer()
 
-        // 4. create path for storing
+        // 4. Ids: document row id + correlation id for logs / queue payload (stored on the row too).
         const documentId = uuidv4()
+        const correlationId = uuidv4()
         const storagePath = `${organizationId}/${documentId}.pdf`
 
         // 5. Save extracted file to the path
@@ -76,7 +84,7 @@ export async function POST(request: Request) {
         }
 
 
-        // 6. Add to documents table
+        // 6. Persist metadata; default processing_status = pending (DB). Worker will flip to processing/ready/failed.
         const { data: document, error: insertError } = await supabase
             .from("documents")
             .insert({
@@ -84,7 +92,8 @@ export async function POST(request: Request) {
                 organization_id: organizationId,
                 user_id: user.id,
                 name: file.name,
-                storage_path: storagePath
+                storage_path: storagePath,
+                ingest_correlation_id: correlationId,
             })
             .select()
             .single()
@@ -97,7 +106,28 @@ export async function POST(request: Request) {
             )
         }
 
-        // 7. Success response
+        // 7. Notify the worker via Redis: RPUSH JSON onto `queue:ingest` (see enqueue-document-ingest.ts).
+        const ingestPayload = createDocumentIngestPayload(
+            documentId,
+            correlationId,
+            organizationId,
+        )
+        const enqueueResult = await enqueueDocumentIngest(ingestPayload)
+        if (!enqueueResult.ok) {
+            if (enqueueResult.skipped) {
+                console.warn(
+                    "Upstash Redis not configured; ingest queue skipped (dev mode?)",
+                    { documentId, enqueuedAt: utcIsoNow() },
+                )
+            } else {
+                console.error(
+                    "Document ingest enqueue failed after upload; document remains pending for reconciler",
+                    { documentId, error: enqueueResult.error },
+                )
+            }
+        }
+
+        // 8. Always return 200 if the file + row succeeded; enqueue failure is logged (reconciler can retry).
         return NextResponse.json({
             success: true,
             document

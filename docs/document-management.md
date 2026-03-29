@@ -14,6 +14,9 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | Document list types | `apps/web/src/types/document.ts` |
 | List | `apps/web/src/app/api/documents/route.ts` |
 | Upload | `apps/web/src/app/api/documents/upload/route.ts` |
+| Ingest queue (Upstash) | `apps/web/src/lib/queue/enqueue-document-ingest.ts`, `document-ingest-payload.ts` |
+| UTC helpers | `apps/web/src/lib/datetime.ts` |
+| Reconcile cron (optional) | `apps/web/src/app/api/cron/reconcile-ingest/route.ts` |
 | Delete | `apps/web/src/app/api/documents/[documentId]/route.ts` |
 | Open (signed URL) | `apps/web/src/app/api/documents/[documentId]/open/route.ts` |
 | Service role helper | `apps/web/src/lib/supabase/service-role.ts` |
@@ -27,7 +30,10 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 |----------|------|
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | User-scoped browser and server access |
-| `SUPABASE_SERVICE_ROLE_KEY` | **Server only**, optional. Used when Storage or RLS blocks the user JWT for **signed URLs** (open), **object removal**, or **row delete**—only after the handler has verified the user and organization. It must not be exposed to the browser. |
+| `SUPABASE_SERVICE_ROLE_KEY` | **Server only**, optional. Used when Storage or RLS blocks the user JWT for **signed URLs** (open), **object removal**, or **row delete**—only after the handler has verified the user and organization. It must not be exposed to the browser. Required for the **reconcile-ingest** cron route (queries all orgs’ pending documents). |
+| `UPSTASH_REDIS_REST_URL` | **Server only**. Upstash Redis REST URL for enqueueing ingest jobs after upload (`RPUSH` to `queue:ingest`). |
+| `UPSTASH_REDIS_REST_TOKEN` | **Server only**. Upstash REST token; do not use a `NEXT_PUBLIC_` prefix. |
+| `CRON_SECRET` | **Server only**, optional. Bearer secret for `GET /api/cron/reconcile-ingest` (Vercel Cron or manual). |
 
 ---
 
@@ -74,6 +80,61 @@ flowchart LR
   style UI fill:#eef2ff,stroke:#6366f1,stroke-width:2px
   style API fill:#ecfdf5,stroke:#10b981,stroke-width:2px
   style SB fill:#fff7ed,stroke:#ea580c,stroke-width:2px
+```
+
+### Ingest queue and reconcile cron (optional)
+
+When [document ingest](document-ingest-pipeline.md) is enabled, uploads **enqueue** jobs to **Upstash Redis**; a **scheduled** caller can hit **`GET /api/cron/reconcile-ingest`** to re-enqueue stale **`pending`** documents if the first **RPUSH** failed. The diagram below adds that path alongside the worker; see [Reconcile cron job](document-ingest-pipeline.md#reconcile-cron-job-optional) for purpose and configuration.
+
+```mermaid
+%%{init: {
+  "theme": "base",
+  "flowchart": { "curve": "basis", "padding": 18 },
+  "themeVariables": {
+    "fontFamily": "ui-sans-serif, system-ui, sans-serif",
+    "lineColor": "#64748b"
+  }
+}}%%
+flowchart TB
+  subgraph schedLayer [Scheduler optional]
+    CronTrigger[Vercel Cron or external]
+  end
+
+  subgraph nextIngest [Next.js API]
+    UploadRoute[POST upload]
+    ReconcileRoute[GET reconcile-ingest]
+  end
+
+  subgraph supaIngest [Supabase]
+    DbIngest[("Postgres")]
+    StIngest[["Storage"]]
+  end
+
+  subgraph redisLayer [Upstash Redis]
+    QueueKey[queue:ingest]
+  end
+
+  subgraph workerLayer [Worker]
+    Proc[Ingest worker]
+    OAI[OpenAI]
+  end
+
+  CronTrigger --> ReconcileRoute
+  ReconcileRoute --> DbIngest
+  ReconcileRoute --> QueueKey
+  UploadRoute --> StIngest
+  UploadRoute --> DbIngest
+  UploadRoute --> QueueKey
+  QueueKey --> Proc
+  Proc --> DbIngest
+  Proc --> StIngest
+  Proc --> OAI
+
+  style schedLayer fill:#fef3c7,stroke:#ca8a04,stroke-width:2px
+  style nextIngest fill:#ecfdf5,stroke:#10b981,stroke-width:2px
+  style supaIngest fill:#fff7ed,stroke:#ea580c,stroke-width:2px
+  style redisLayer fill:#fce7f3,stroke:#db2777,stroke-width:2px
+  style workerLayer fill:#f0fdf4,stroke:#16a34a,stroke-width:2px
 ```
 
 ---
@@ -304,9 +365,20 @@ sequenceDiagram
 | Action | HTTP | Notes |
 |--------|------|--------|
 | List | `GET /api/documents` | Session cookie; `Cache-Control: private, no-store` |
-| Upload | `POST /api/documents/upload` | `multipart/form-data`, field **`file`**, one PDF per request |
+| Upload | `POST /api/documents/upload` | `multipart/form-data`, field **`file`**, one PDF per request. Inserts `ingest_correlation_id` and **RPUSH**es to Upstash (`queue:ingest`) when Redis env is set. |
+| Reconcile ingest | `GET /api/cron/reconcile-ingest` | Optional safety net — see below. |
 | Open | `GET /api/documents/:documentId/open` | **302** to signed Storage URL |
 | Delete | `DELETE /api/documents/:documentId` | Storage object then DB row; JSON errors |
+
+### Reconcile cron job (optional)
+
+**Why it exists:** Upload normally inserts a row **and** enqueues work to Redis. If enqueue fails after the row exists, the document can stay **`pending`** forever. The reconcile route finds **stale `pending`** documents (older than **`minAgeMinutes`**, default **5**) and **RPUSH**es a job again, with a Redis lock per document to limit duplicates.
+
+**When it is needed:** Only as a **recovery** path. It is **not** required when every upload successfully enqueues.
+
+**How it runs:** `Authorization: Bearer <CRON_SECRET>`. Requires **`CRON_SECRET`**, **`SUPABASE_SERVICE_ROLE_KEY`**, and Upstash Redis in the server environment. [`apps/web/vercel.json`](../apps/web/vercel.json) schedules this **once per day at 00:00 UTC** on **Vercel**; other platforms can use their own cron or omit scheduling until production.
+
+Full detail: [Document ingest pipeline — Reconcile cron job](document-ingest-pipeline.md#reconcile-cron-job-optional).
 
 ---
 
