@@ -2,6 +2,7 @@
  * Document ingest queue consumer: CAS claim, PDF extract, chunk, embed, transactional PG write.
  */
 import "dotenv/config";
+import http from "node:http";
 import OpenAI from "openai";
 import { Redis } from "ioredis";
 
@@ -19,6 +20,27 @@ function requireRedisUrl(): string {
   return v;
 }
 
+/** Railway (and similar) expect an HTTP listener on PORT for deploy health checks. */
+function startHealthServer(): http.Server {
+  const port = Number.parseInt(process.env.PORT ?? "8787", 10);
+  const server = http.createServer((req, res) => {
+    const path = req.url?.split("?")[0] ?? "";
+    if (path === "/" || path === "/health") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("ok");
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  server.listen(port, "0.0.0.0", () => {
+    console.log(
+      JSON.stringify({ stage: "health_listen", port, bind: "0.0.0.0" }),
+    );
+  });
+  return server;
+}
+
 async function main() {
   let config;
   try {
@@ -30,6 +52,8 @@ async function main() {
     );
     process.exit(1);
   }
+
+  const healthServer = startHealthServer();
 
   const redisUrl = requireRedisUrl();
   const supabase = createSupabaseAdmin(
@@ -75,6 +99,7 @@ async function main() {
   const shutdown = () => {
     console.info("[document-worker] shutdown signal");
     controller.abort();
+    healthServer.close();
     for (const r of redises) {
       r.disconnect();
     }
