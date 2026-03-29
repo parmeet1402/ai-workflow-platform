@@ -15,7 +15,7 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | List | `apps/web/src/app/api/documents/route.ts` |
 | Upload | `apps/web/src/app/api/documents/upload/route.ts` |
 | Ingest queue (Upstash) | `apps/web/src/lib/queue/redis-keys.ts`, `enqueue-document-ingest.ts`, `document-ingest-payload.ts` |
-| Ingest consumer (Part 4) | `apps/document-worker/` — `ioredis` **BLPOP** + DLQ |
+| Ingest worker | `apps/document-worker/` — **BLPOP**, CAS claim, `unpdf` + OpenAI embed, RPC finalize/fail; migration `supabase/migrations/20260329120000_document_ingest_pipeline.sql` |
 | UTC helpers | `apps/web/src/lib/datetime.ts` |
 | Reconcile cron (optional) | `apps/web/src/app/api/cron/reconcile-ingest/route.ts` |
 | Delete | `apps/web/src/app/api/documents/[documentId]/route.ts` |
@@ -35,6 +35,8 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | `UPSTASH_REDIS_REST_URL` | **Server only**. Upstash Redis REST URL for enqueueing ingest jobs after upload (`RPUSH` to `queue:ingest`). |
 | `UPSTASH_REDIS_REST_TOKEN` | **Server only**. Upstash REST token; do not use a `NEXT_PUBLIC_` prefix. |
 | `CRON_SECRET` | **Server only**, optional. Bearer secret for `GET /api/cron/reconcile-ingest` (Vercel Cron or manual). |
+
+**Document worker** (Railway / Render, not Vercel): `UPSTASH_REDIS_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENAI_API_KEY`, plus optional tuning vars documented in `apps/document-worker/README.md`.
 
 ---
 

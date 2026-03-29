@@ -1,55 +1,89 @@
 /**
- * Document ingest queue consumer.
+ * Document ingest queue consumer: CAS claim, PDF extract, chunk, embed, transactional PG write.
  */
 import "dotenv/config";
+import OpenAI from "openai";
 import { Redis } from "ioredis";
 
+import { loadConfig } from "./config.js";
 import { runIngestConsumerLoop } from "./consumer.js";
+import { runDocumentIngest } from "./processor/run-document-ingest.js";
+import { createSupabaseAdmin } from "./supabase/admin.js";
 
-function requireEnv(name: string): string {
-  const v = process.env[name]?.trim();
+function requireRedisUrl(): string {
+  const v = process.env.UPSTASH_REDIS_URL?.trim();
   if (!v) {
-    console.error(`Missing required env: ${name}`);
+    console.error("Missing required env: UPSTASH_REDIS_URL");
     process.exit(1);
   }
   return v;
 }
 
 async function main() {
-  const url = requireEnv("UPSTASH_REDIS_URL");
+  let config;
+  try {
+    config = loadConfig();
+  } catch (e) {
+    console.error(
+      "Invalid worker configuration (check SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENAI_API_KEY):",
+      e,
+    );
+    process.exit(1);
+  }
 
-  const redis = new Redis(url, {
-    maxRetriesPerRequest: null,
-    enableReadyCheck: false,
-  });
+  const redisUrl = requireRedisUrl();
+  const supabase = createSupabaseAdmin(
+    config.supabaseUrl,
+    config.supabaseServiceRoleKey,
+  );
+  const openai = new OpenAI({ apiKey: config.openaiApiKey });
 
-  redis.on("error", (err: Error) => {
-    console.error("[document-worker] Redis connection error", err);
-  });
+  const n = config.workerConcurrency;
+  const redises = Array.from(
+    { length: n },
+    () =>
+      new Redis(redisUrl, {
+        maxRetriesPerRequest: null,
+        enableReadyCheck: false,
+      }),
+  );
+
+  for (const r of redises) {
+    r.on("error", (err: Error) => {
+      console.error("[document-worker] Redis connection error", err);
+    });
+  }
 
   const controller = new AbortController();
   const shutdown = () => {
     console.info("[document-worker] shutdown signal");
     controller.abort();
-    redis.disconnect();
+    for (const r of redises) {
+      r.disconnect();
+    }
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  console.info(
-    "[document-worker] Part 4 consumer started (BLPOP FIFO; pipeline stub until Part 5)",
+  console.log(
+    JSON.stringify({
+      stage: "startup",
+      workerConcurrency: n,
+      embeddingModel: config.embeddingModel,
+      embeddingDimensions: config.embeddingDimensions,
+    }),
   );
 
-  await runIngestConsumerLoop(redis, {
-    signal: controller.signal,
-    onJob: async (job) => {
-      console.info("[document-worker] received job", {
-        documentId: job.documentId,
-        correlationId: job.correlationId,
-        organizationId: job.organizationId,
-      });
-    },
-  });
+  await Promise.all(
+    redises.map((redis) =>
+      runIngestConsumerLoop(redis, {
+        signal: controller.signal,
+        onJob: async (job) => {
+          await runDocumentIngest(supabase, openai, config, job);
+        },
+      }),
+    ),
+  );
 }
 
 main().catch((e) => {

@@ -215,9 +215,10 @@ Implementation file: `apps/web/src/app/dashboard/dashboard-documents.tsx`.
 | Key names | [`apps/web/src/lib/queue/redis-keys.ts`](../apps/web/src/lib/queue/redis-keys.ts) | `queue:ingest` (main FIFO list), `queue:ingest:dlq` (dead letters), `reconcile:lock:*` (cron dedup; see enqueue module). |
 | Producer (Next.js) | [`enqueue-document-ingest.ts`](../apps/web/src/lib/queue/enqueue-document-ingest.ts) | `@upstash/redis` REST **`RPUSH`** to the **tail** of `queue:ingest`. |
 | DLQ from API | Same file, `pushIngestToDlq` | **`LPUSH`** JSON (`rawMessage`, `reason`, `at`) to `queue:ingest:dlq` for tooling or future admin paths. |
-| Consumer (worker) | [`apps/document-worker`](../apps/document-worker/) | **`ioredis`** over **`UPSTASH_REDIS_URL`** (`rediss://`); **`BLPOP queue:ingest 0`** on the **head** → **FIFO** with the producer. Malformed payloads or handler errors are **LPUSH**ed to the DLQ. |
+| Consumer (worker) | [`apps/document-worker`](../apps/document-worker/) | **`ioredis`** over **`UPSTASH_REDIS_URL`** (`rediss://`); **`BLPOP queue:ingest 0`** on the **head** → **FIFO** with the producer. Malformed payloads or unhandled **`onJob`** errors are **LPUSH**ed to the DLQ. |
+| Part 5 pipeline | Same package: [`processor/run-document-ingest.ts`](../apps/document-worker/src/processor/run-document-ingest.ts), [`db/claim-and-finalize.ts`](../apps/document-worker/src/db/claim-and-finalize.ts), [`embed/openai.ts`](../apps/document-worker/src/embed/openai.ts) | **CAS** `pending`→`processing`; Storage download; **`unpdf`** extract; chunk + overlap; OpenAI **`text-embedding-3-small`** (dim **1536**); RPC **`worker_finalize_document_ingest`** (transaction: replace chunks, `ready`). Failures call **`worker_fail_document_processing`**. |
 
-The worker entrypoint currently **logs** each job (stub until Part 5 pipeline). Run it with `pnpm --filter document-worker dev` from the repo root.
+Run locally: `pnpm --filter document-worker dev` from the repo root. SQL: [`supabase/migrations/20260329120000_document_ingest_pipeline.sql`](../supabase/migrations/20260329120000_document_ingest_pipeline.sql).
 
 ---
 
@@ -240,10 +241,11 @@ The worker entrypoint currently **logs** each job (stub until Part 5 pipeline). 
 
 | Variable | Purpose |
 |----------|---------|
-| `UPSTASH_REDIS_URL` | **Required for Part 4 consumer.** Redis protocol URL from Upstash (`rediss://…`), not the REST URL. |
-| `SUPABASE_URL` | Same project URL (Part 5) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Storage download and chunk writes (Part 5) |
-| `OPENAI_API_KEY` | Embeddings (Part 5) |
+| `UPSTASH_REDIS_URL` | **Required.** Redis protocol URL from Upstash (`rediss://…`), not the REST URL. |
+| `SUPABASE_URL` | **Required.** Same project URL as the web app. |
+| `SUPABASE_SERVICE_ROLE_KEY` | **Required.** Storage download + RPC finalize/fail. |
+| `OPENAI_API_KEY` | **Required.** Embeddings on the worker only. |
+| `WORKER_CONCURRENCY`, `MAX_PDF_BYTES`, `MAX_CHUNKS_PER_DOCUMENT`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | Optional guardrails (see worker `README.md`; DB uses **`vector(1536)`** today). |
 | `TZ=UTC` | Recommended so Node and Postgres session defaults interpret `now()` as UTC when writing **`timestamp without time zone`** (see below) |
 
 ---
@@ -443,14 +445,14 @@ WHERE table_schema = 'public'
 
 ## Implementation checklist
 
-- [ ] Supabase migrations: `documents` processing columns (`timestamp without time zone`, UTC convention), `document_chunks` + `vector`, RLS for chunks.
-- [ ] `enqueue-document-ingest.ts` and dependency `@upstash/redis`.
-- [ ] Upload route: insert fields, enqueue, correlation id.
-- [ ] List route: extended `select`.
-- [ ] Worker package: Redis loop, pipeline, OpenAI, transactional writes.
-- [ ] Dashboard: status and polling.
-- [ ] Optional: reconcile cron and DLQ.
-- [ ] [document-management.md](document-management.md) API table updated when routes expose new fields.
+- [ ] Supabase migrations: `documents` processing columns (`timestamp without time zone`, UTC convention), `document_chunks` + `vector`, RLS for chunks — see [`supabase/migrations/20260329120000_document_ingest_pipeline.sql`](../supabase/migrations/20260329120000_document_ingest_pipeline.sql).
+- [x] `enqueue-document-ingest.ts` and dependency `@upstash/redis`.
+- [x] Upload route: insert fields, enqueue, correlation id.
+- [x] List route: extended `select`.
+- [x] Worker package: Redis **BLPOP**, CAS claim, extract/chunk/embed, RPC transactional writes (`worker_finalize_document_ingest` / `worker_fail_document_processing`).
+- [x] Dashboard: status and polling.
+- [x] Optional: reconcile cron and DLQ (Redis + route).
+- [x] [document-management.md](document-management.md) API fields for processing status.
 
 ---
 
