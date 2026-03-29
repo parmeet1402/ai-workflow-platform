@@ -6,6 +6,14 @@ import type { Redis as RedisClient } from "ioredis";
 
 import { REDIS_INGEST_DLQ_KEY, REDIS_INGEST_QUEUE_KEY } from "./redis-keys.js";
 
+/**
+ * Block at most this many seconds waiting for a job, then retry BLPOP.
+ * Infinite BLPOP (0) keeps one TCP session open indefinitely; proxies in front
+ * of managed Redis (e.g. Upstash) often reset idle connections — periodic
+ * wakeups avoid ECONNRESET storms while preserving FIFO when the queue is busy.
+ */
+const BLPOP_BLOCK_SECONDS = 55;
+
 export type ParsedIngestJob = {
   documentId: string;
   correlationId: string;
@@ -62,8 +70,8 @@ export async function runIngestConsumerLoop(
   while (!signal.aborted) {
     let result: [string, string] | null;
     try {
-      // BLPOP key timeoutSeconds — 0 blocks until an element is available.
-      result = await redis.blpop(REDIS_INGEST_QUEUE_KEY, 0);
+      // BLPOP key timeoutSeconds — bounded block so long-lived idle TCP is rare.
+      result = await redis.blpop(REDIS_INGEST_QUEUE_KEY, BLPOP_BLOCK_SECONDS);
     } catch (e) {
       if (signal.aborted) break;
       console.error("[ingest-consumer] BLPOP error", e);

@@ -45,11 +45,28 @@ async function main() {
       new Redis(redisUrl, {
         maxRetriesPerRequest: null,
         enableReadyCheck: false,
+        // Helps some networks keep the TLS/TCP session from looking fully idle.
+        keepAlive: 10_000,
       }),
   );
 
+  let lastTransientRedisLog = 0;
   for (const r of redises) {
-    r.on("error", (err: Error) => {
+    r.on("error", (err: Error & { code?: string }) => {
+      const code = err.code;
+      const transient =
+        code === "ECONNRESET" || code === "EPIPE" || code === "ETIMEDOUT";
+      if (transient) {
+        const now = Date.now();
+        if (now - lastTransientRedisLog > 30_000) {
+          lastTransientRedisLog = now;
+          console.error(
+            "[document-worker] Redis connection dropped (reconnecting):",
+            code ?? err.message,
+          );
+        }
+        return;
+      }
       console.error("[document-worker] Redis connection error", err);
     });
   }
