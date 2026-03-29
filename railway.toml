@@ -9,5 +9,4 @@ dockerfilePath = "apps/document-worker/Dockerfile"
 # Must match routes in apps/document-worker/src/index.ts health server
 healthcheckPath = "/health"
 healthcheckTimeout = 300
-# Dockerfile CMD already runs node dist/index.js from /app/apps/document-worker
-startCommand = "node dist/index.js"
+startCommand = "node /app/apps/document-worker/dist/index.js"

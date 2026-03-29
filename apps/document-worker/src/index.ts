@@ -37,7 +37,10 @@ function httpListenPort(): number {
 function startHealthServer(): Promise<http.Server> {
   const port = httpListenPort();
   const server = http.createServer((req, res) => {
-    const pathOnly = req.url?.split("?")[0] ?? "";
+    let pathOnly = req.url?.split("?")[0] ?? "";
+    if (pathOnly.length > 1 && pathOnly.endsWith("/")) {
+      pathOnly = pathOnly.slice(0, -1);
+    }
     const ok =
       pathOnly === "/" ||
       pathOnly === "/health" ||
@@ -59,7 +62,12 @@ function startHealthServer(): Promise<http.Server> {
     server.listen(port, "0.0.0.0", () => {
       server.removeListener("error", reject);
       console.log(
-        JSON.stringify({ stage: "health_listen", port, bind: "0.0.0.0" }),
+        JSON.stringify({
+          stage: "health_listen",
+          port,
+          bind: "0.0.0.0",
+          envPort: process.env.PORT ?? null,
+        }),
       );
       resolve(server);
     });
@@ -67,6 +75,10 @@ function startHealthServer(): Promise<http.Server> {
 }
 
 async function main() {
+  // Bind PORT before config validation so Railway HTTP healthchecks can succeed even if
+  // env is still wrong (you'll see Zod errors in logs and a restart until vars are set).
+  const healthServer = await startHealthServer();
+
   let config;
   try {
     config = loadConfig();
@@ -77,8 +89,6 @@ async function main() {
     );
     process.exit(1);
   }
-
-  const healthServer = await startHealthServer();
 
   const redisUrl = requireRedisUrl();
   const supabase = createSupabaseAdmin(

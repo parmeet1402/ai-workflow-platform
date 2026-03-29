@@ -19,4 +19,5 @@ COPY apps/document-worker ./apps/document-worker
 RUN pnpm --filter document-worker build
 
 WORKDIR /app/apps/document-worker
-CMD ["node", "dist/index.js"]
+# Absolute path so overridden start commands still work if WORKDIR is ignored
+CMD ["node", "/app/apps/document-worker/dist/index.js"]
