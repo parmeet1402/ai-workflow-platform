@@ -20,25 +20,50 @@ function requireRedisUrl(): string {
   return v;
 }
 
-/** Railway (and similar) expect an HTTP listener on PORT for deploy health checks. */
-function startHealthServer(): http.Server {
-  const port = Number.parseInt(process.env.PORT ?? "8787", 10);
+function httpListenPort(): number {
+  const raw = process.env.PORT;
+  if (raw == null || String(raw).trim() === "") {
+    return 8787;
+  }
+  const n = Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isFinite(n) || n < 1 || n > 65_535) {
+    console.error("[document-worker] Invalid PORT:", raw);
+    process.exit(1);
+  }
+  return n;
+}
+
+/** Railway injects PORT; the process must listen before HTTP health checks pass. */
+function startHealthServer(): Promise<http.Server> {
+  const port = httpListenPort();
   const server = http.createServer((req, res) => {
-    const path = req.url?.split("?")[0] ?? "";
-    if (path === "/" || path === "/health") {
+    const pathOnly = req.url?.split("?")[0] ?? "";
+    const ok =
+      pathOnly === "/" ||
+      pathOnly === "/health" ||
+      pathOnly === "/healthz";
+    if (
+      ok &&
+      (req.method === "GET" || req.method === "HEAD")
+    ) {
       res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("ok");
+      if (req.method === "GET") res.end("ok");
+      else res.end();
       return;
     }
     res.writeHead(404);
     res.end();
   });
-  server.listen(port, "0.0.0.0", () => {
-    console.log(
-      JSON.stringify({ stage: "health_listen", port, bind: "0.0.0.0" }),
-    );
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "0.0.0.0", () => {
+      server.removeListener("error", reject);
+      console.log(
+        JSON.stringify({ stage: "health_listen", port, bind: "0.0.0.0" }),
+      );
+      resolve(server);
+    });
   });
-  return server;
 }
 
 async function main() {
@@ -53,7 +78,7 @@ async function main() {
     process.exit(1);
   }
 
-  const healthServer = startHealthServer();
+  const healthServer = await startHealthServer();
 
   const redisUrl = requireRedisUrl();
   const supabase = createSupabaseAdmin(
