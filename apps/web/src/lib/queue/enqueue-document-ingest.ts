@@ -1,13 +1,8 @@
 /**
  * Ingest queue — Upstash Redis (REST) from Next.js API routes.
  *
- * **What this file does:** appends JSON job messages to a Redis **list** named `queue:ingest`.
- * The background **worker** (separate process on Railway/Render) should **pop** those messages
- * using a blocking pop (`BLPOP` or `BRPOP`) over the Redis protocol — not implemented here.
- *
- * **RPUSH:** we push onto the **right** (tail) of the list. For FIFO, the worker should use
- * **`BLPOP queue:ingest`** (pop from the **left**) so the oldest job is processed first.
- * (Alternatively: `LPUSH` here + `BRPOP` in the worker — same FIFO idea.)
+ * **FIFO contract:** this module **RPUSH**es to the tail of `REDIS_INGEST_QUEUE_KEY`.
+ * The worker **BLPOP**s from the head (see `apps/document-worker`).
  *
  * **Retries:** network blips to Upstash are retried a few times; if all fail, the DB row still
  * exists as `pending` and `/api/cron/reconcile-ingest` can RPUSH again later.
@@ -15,9 +10,15 @@
 
 import { Redis } from "@upstash/redis";
 import type { DocumentIngestQueuePayload } from "@/lib/queue/document-ingest-payload";
+import {
+  REDIS_INGEST_DLQ_KEY,
+  REDIS_INGEST_QUEUE_KEY,
+  REDIS_RECONCILE_LOCK_TTL_SECONDS,
+  redisReconcileLockKey,
+} from "@/lib/queue/redis-keys";
 
-/** Redis list key shared with the worker consumer. */
-export const DOCUMENT_INGEST_QUEUE_KEY = "queue:ingest";
+/** @deprecated Use REDIS_INGEST_QUEUE_KEY from redis-keys */
+export { DOCUMENT_INGEST_QUEUE_KEY, REDIS_INGEST_QUEUE_KEY } from "@/lib/queue/redis-keys";
 
 export function isUpstashRedisConfigured(): boolean {
   return Boolean(
@@ -40,7 +41,7 @@ export type EnqueueResult =
   | { ok: false; error: string; skipped?: boolean };
 
 /**
- * Serializes `payload` to JSON and **RPUSH**es it onto `DOCUMENT_INGEST_QUEUE_KEY`.
+ * Serializes `payload` to JSON and **RPUSH**es it onto the ingest list (tail).
  * Retries up to 3 times on transient failures.
  * If Redis env is missing, returns `{ ok: false, skipped: true }` so uploads still work in local dev.
  */
@@ -61,8 +62,7 @@ export async function enqueueDocumentIngest(
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      // Redis: append one job string to the tail of the list (producer side of the queue).
-      await redis.rpush(DOCUMENT_INGEST_QUEUE_KEY, value);
+      await redis.rpush(REDIS_INGEST_QUEUE_KEY, value);
       return { ok: true };
     } catch (e) {
       lastError = e instanceof Error ? e : new Error(String(e));
@@ -77,8 +77,37 @@ export async function enqueueDocumentIngest(
     : { ok: false, error: "enqueue failed" };
 }
 
-const RECONCILE_LOCK_PREFIX = "reconcile:lock:";
-const RECONCILE_LOCK_TTL_SECONDS = 120;
+/** Record stored on `REDIS_INGEST_DLQ_KEY` (JSON string, **LPUSH**). */
+export type IngestDlqRecord = {
+  rawMessage: string;
+  reason: string;
+  at: string;
+};
+
+/**
+ * **LPUSH**es a diagnostic record onto the dead-letter list (`queue:ingest:dlq`).
+ * Use when a message is poisoned or abandoned (worker or future admin tooling).
+ */
+export async function pushIngestToDlq(
+  record: IngestDlqRecord,
+): Promise<EnqueueResult> {
+  const redis = getRedis();
+  if (!redis) {
+    return {
+      ok: false,
+      skipped: true,
+      error: "Redis not configured",
+    };
+  }
+
+  try {
+    await redis.lpush(REDIS_INGEST_DLQ_KEY, JSON.stringify(record));
+    return { ok: true };
+  } catch (e) {
+    const err = e instanceof Error ? e : new Error(String(e));
+    return { ok: false, error: err.message };
+  }
+}
 
 /**
  * Tries to claim a short-lived Redis lock for `documentId` so two concurrent cron runs
@@ -90,10 +119,10 @@ export async function tryAcquireReconcileLock(
   const redis = getRedis();
   if (!redis) return false;
 
-  const key = `${RECONCILE_LOCK_PREFIX}${documentId}`;
+  const key = redisReconcileLockKey(documentId);
   try {
     const result = await redis.set(key, "1", {
-      ex: RECONCILE_LOCK_TTL_SECONDS,
+      ex: REDIS_RECONCILE_LOCK_TTL_SECONDS,
       nx: true,
     });
     return result === "OK";

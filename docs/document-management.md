@@ -14,7 +14,8 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | Document list types | `apps/web/src/types/document.ts` |
 | List | `apps/web/src/app/api/documents/route.ts` |
 | Upload | `apps/web/src/app/api/documents/upload/route.ts` |
-| Ingest queue (Upstash) | `apps/web/src/lib/queue/enqueue-document-ingest.ts`, `document-ingest-payload.ts` |
+| Ingest queue (Upstash) | `apps/web/src/lib/queue/redis-keys.ts`, `enqueue-document-ingest.ts`, `document-ingest-payload.ts` |
+| Ingest consumer (Part 4) | `apps/document-worker/` — `ioredis` **BLPOP** + DLQ |
 | UTC helpers | `apps/web/src/lib/datetime.ts` |
 | Reconcile cron (optional) | `apps/web/src/app/api/cron/reconcile-ingest/route.ts` |
 | Delete | `apps/web/src/app/api/documents/[documentId]/route.ts` |

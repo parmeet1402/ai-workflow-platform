@@ -208,6 +208,19 @@ Implementation file: `apps/web/src/app/dashboard/dashboard-documents.tsx`.
 
 ---
 
+## Redis queue — implementation
+
+| Role | Location | Mechanism |
+|------|----------|-----------|
+| Key names | [`apps/web/src/lib/queue/redis-keys.ts`](../apps/web/src/lib/queue/redis-keys.ts) | `queue:ingest` (main FIFO list), `queue:ingest:dlq` (dead letters), `reconcile:lock:*` (cron dedup; see enqueue module). |
+| Producer (Next.js) | [`enqueue-document-ingest.ts`](../apps/web/src/lib/queue/enqueue-document-ingest.ts) | `@upstash/redis` REST **`RPUSH`** to the **tail** of `queue:ingest`. |
+| DLQ from API | Same file, `pushIngestToDlq` | **`LPUSH`** JSON (`rawMessage`, `reason`, `at`) to `queue:ingest:dlq` for tooling or future admin paths. |
+| Consumer (worker) | [`apps/document-worker`](../apps/document-worker/) | **`ioredis`** over **`UPSTASH_REDIS_URL`** (`rediss://`); **`BLPOP queue:ingest 0`** on the **head** → **FIFO** with the producer. Malformed payloads or handler errors are **LPUSH**ed to the DLQ. |
+
+The worker entrypoint currently **logs** each job (stub until Part 5 pipeline). Run it with `pnpm --filter document-worker dev` from the repo root.
+
+---
+
 ## Environment variables
 
 ### Next.js (server-only where noted)
@@ -227,10 +240,10 @@ Implementation file: `apps/web/src/app/dashboard/dashboard-documents.tsx`.
 
 | Variable | Purpose |
 |----------|---------|
-| `SUPABASE_URL` | Same project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Required for Storage download and chunk writes |
-| Redis | **`rediss://`** URL for `ioredis` / blocking pop (from Upstash) |
-| `OPENAI_API_KEY` | Embeddings |
+| `UPSTASH_REDIS_URL` | **Required for Part 4 consumer.** Redis protocol URL from Upstash (`rediss://…`), not the REST URL. |
+| `SUPABASE_URL` | Same project URL (Part 5) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Storage download and chunk writes (Part 5) |
+| `OPENAI_API_KEY` | Embeddings (Part 5) |
 | `TZ=UTC` | Recommended so Node and Postgres session defaults interpret `now()` as UTC when writing **`timestamp without time zone`** (see below) |
 
 ---
