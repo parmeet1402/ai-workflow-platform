@@ -38,8 +38,22 @@ function parseIntEnv(
   return Math.min(max, Math.max(min, n));
 }
 
+/**
+ * Railway/Vercel often expose only `NEXT_PUBLIC_SUPABASE_URL`; worker historically expected `SUPABASE_URL`.
+ */
+function resolvedSupabaseUrl(): string {
+  return (
+    process.env.SUPABASE_URL?.trim() ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() ||
+    ""
+  );
+}
+
 export function loadConfig(): WorkerConfig {
-  const e = envSchema.parse(process.env);
+  const e = envSchema.parse({
+    ...process.env,
+    SUPABASE_URL: resolvedSupabaseUrl(),
+  });
   return {
     supabaseUrl: e.SUPABASE_URL.trim(),
     supabaseServiceRoleKey: e.SUPABASE_SERVICE_ROLE_KEY.trim(),

@@ -86,7 +86,7 @@ async function main() {
     config = loadConfig();
   } catch (e) {
     console.error(
-      "Invalid worker configuration (check SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENAI_API_KEY):",
+      "Invalid worker configuration (set SUPABASE_URL or NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OPENAI_API_KEY on the worker service):",
       e,
     );
     process.exit(1);
