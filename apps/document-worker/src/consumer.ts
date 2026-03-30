@@ -74,11 +74,18 @@ export async function runIngestConsumerLoop(
       const now = Date.now();
       if (now - lastWaitLogAt > 10_000) {
         lastWaitLogAt = now;
+        let queueLen: number | null = null;
+        try {
+          queueLen = await redis.llen(REDIS_INGEST_QUEUE_KEY);
+        } catch {
+          // ignore; queueLen is only for debugging
+        }
         console.log(
           JSON.stringify({
             stage: "ingest_waiting",
             message: "waiting on BLPOP",
             queue: REDIS_INGEST_QUEUE_KEY,
+            queueLen,
           }),
         );
       }

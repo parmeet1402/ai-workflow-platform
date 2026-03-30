@@ -6,6 +6,7 @@
  */
 import "dotenv/config";
 import http from "node:http";
+import { REDIS_INGEST_QUEUE_KEY } from "./redis-keys.js";
 
 function requireRedisUrl(): string {
   const v = process.env.UPSTASH_REDIS_URL?.trim();
@@ -93,6 +94,21 @@ async function main() {
   }
 
   const redisUrl = requireRedisUrl();
+  try {
+    const u = new URL(redisUrl);
+    console.log(
+      JSON.stringify({
+        stage: "redis_target",
+        message: "connecting to Redis",
+        protocol: u.protocol,
+        host: u.hostname,
+        port: u.port ?? null,
+        queue: REDIS_INGEST_QUEUE_KEY,
+      }),
+    );
+  } catch {
+    // Ignore URL parse errors; env validation for required fields happens elsewhere.
+  }
   const supabase = createSupabaseAdmin(
     config.supabaseUrl,
     config.supabaseServiceRoleKey,
@@ -134,6 +150,20 @@ async function main() {
       }
       console.error("[document-worker] Redis connection error", err);
     });
+  }
+
+  // One-time visibility into whether the worker sees enqueued jobs.
+  try {
+    const qlen = await redises[0]!.llen(REDIS_INGEST_QUEUE_KEY);
+    console.log(
+      JSON.stringify({
+        stage: "redis_queue_snapshot",
+        queue: REDIS_INGEST_QUEUE_KEY,
+        queueLen: qlen,
+      }),
+    );
+  } catch {
+    // Non-fatal debug; BLPOP/commands will still surface connection issues.
   }
 
   const controller = new AbortController();
