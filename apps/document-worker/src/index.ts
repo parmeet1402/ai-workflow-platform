@@ -137,16 +137,16 @@ async function main() {
   }
 
   const controller = new AbortController();
-  const shutdown = () => {
-    console.info("[document-worker] shutdown signal");
+  const shutdown = (signalName: string) => {
+    console.info("[document-worker] shutdown signal", signalName);
     controller.abort();
     healthServer.close();
     for (const r of redises) {
       r.disconnect();
     }
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 
   console.log(
     JSON.stringify({

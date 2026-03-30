@@ -66,10 +66,22 @@ export async function runIngestConsumerLoop(
   },
 ): Promise<void> {
   const { onJob, signal } = options;
+  let lastWaitLogAt = 0;
 
   while (!signal.aborted) {
     let result: [string, string] | null;
     try {
+      const now = Date.now();
+      if (now - lastWaitLogAt > 10_000) {
+        lastWaitLogAt = now;
+        console.log(
+          JSON.stringify({
+            stage: "ingest_waiting",
+            message: "waiting on BLPOP",
+            queue: REDIS_INGEST_QUEUE_KEY,
+          }),
+        );
+      }
       // BLPOP key timeoutSeconds — bounded block so long-lived idle TCP is rare.
       result = await redis.blpop(REDIS_INGEST_QUEUE_KEY, BLPOP_BLOCK_SECONDS);
     } catch (e) {
@@ -82,6 +94,14 @@ export async function runIngestConsumerLoop(
     if (!result || signal.aborted) continue;
 
     const [, payload] = result;
+    console.log(
+      JSON.stringify({
+        stage: "ingest_blpop_hit",
+        message: "BLPOP returned a payload",
+        queue: REDIS_INGEST_QUEUE_KEY,
+        payloadBytes: payload.length,
+      }),
+    );
     const parsed = parseIngestPayload(payload);
     if (!parsed) {
       console.error(
@@ -97,6 +117,14 @@ export async function runIngestConsumerLoop(
     }
 
     try {
+      console.log(
+        JSON.stringify({
+          stage: "ingest_parsed_job",
+          documentId: parsed.documentId,
+          correlationId: parsed.correlationId,
+          organizationId: parsed.organizationId,
+        }),
+      );
       await onJob(parsed, payload);
     } catch (err) {
       console.error("[ingest-consumer] onJob failed", parsed.documentId, err);
