@@ -219,6 +219,7 @@ export default function DashboardDocuments() {
               contentType: file.type,
             },
             (bytesUploaded, bytesTotal) => {
+              // Progress bar update
               const percent =
                 bytesTotal > 0
                   ? Math.round((bytesUploaded / bytesTotal) * 100)
@@ -262,6 +263,8 @@ export default function DashboardDocuments() {
       return uploaded;
     },
     onSuccess: (uploadedDocuments) => {
+      // File upload success, show alert and reset the form
+
       setSelectedCount(0);
 
       toast.success("Documents uploaded", {
@@ -333,7 +336,7 @@ export default function DashboardDocuments() {
               render={({ field }) => (
                 <Input
                   type="file"
-                  multiple
+                  multiple={false}
                   accept="application/pdf"
                   ref={(el) => {
                     field.ref(el);

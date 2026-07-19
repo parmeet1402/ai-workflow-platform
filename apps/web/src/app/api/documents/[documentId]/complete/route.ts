@@ -30,6 +30,8 @@ export async function POST(
     context: { params: Promise<{ documentId: string }> },
 ) {
     try {
+        // documentId comes from the route and must match the id `register` handed the client;
+        // it also decides the storage path we verify below, so a missing value is a hard 400.
         const { documentId } = await context.params;
         if (!documentId) {
             return NextResponse.json({ error: "Missing document id" }, { status: 400 });
@@ -37,6 +39,8 @@ export async function POST(
 
         const supabase = await createClient();
 
+        // Re-authenticate: `complete` is a separate request from `register`, so the session is
+        // checked again rather than trusting anything carried over from the earlier call.
         const {
             data: { user },
             error: userError,
@@ -46,6 +50,7 @@ export async function POST(
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
         }
 
+        // Throttle per user, mirroring `register`, so the two-step flow can't be abused end-to-end.
         const rateLimit = checkRateLimit(
             `upload-complete:${user.id}`,
             COMPLETE_RATE_LIMIT,
@@ -58,6 +63,8 @@ export async function POST(
             );
         }
 
+        // Resolve the org from the session (not the request body) so we verify and insert against
+        // the same org the file was allowed to land under; the storage path is derived from it.
         const { data: membership, error: membershipError } = await supabase
             .from("memberships")
             .select("organization_id")
@@ -73,6 +80,8 @@ export async function POST(
 
         const organizationId = membership.organization_id;
 
+        // Only the display name is accepted from the client here; size/type are re-derived from the
+        // actual stored object below rather than trusted from the request.
         let body: unknown;
         try {
             body = await request.json();
@@ -85,6 +94,8 @@ export async function POST(
             return NextResponse.json({ error: "Missing file name" }, { status: 400 });
         }
 
+        // Recompute the expected location from org + id (never client input) so we verify exactly
+        // where `register` told the browser to upload. objectName is the leaf within the org folder.
         const storagePath = documentStoragePath(organizationId, documentId);
         const objectName = `${documentId}.pdf`;
 
@@ -98,6 +109,8 @@ export async function POST(
             );
         }
 
+        // Confirm the browser's direct upload actually produced an object at the expected path.
+        // Without this, a client could call `complete` for a file it never successfully uploaded.
         const { data: listing, error: listError } = await service.storage
             .from(DOCUMENTS_BUCKET)
             .list(organizationId, { search: objectName, limit: 1 });
@@ -110,6 +123,7 @@ export async function POST(
             );
         }
 
+        // `search` is a substring match, so pin to an exact filename match before trusting it.
         const uploaded = listing?.find((obj) => obj.name === objectName);
         if (!uploaded) {
             return NextResponse.json(
@@ -118,6 +132,7 @@ export async function POST(
             );
         }
 
+        // Trust size/type from Storage's own metadata (what actually landed), not the client.
         const meta = uploaded.metadata as { size?: number; mimetype?: string } | null;
         const uploadedSize = typeof meta?.size === "number" ? meta.size : null;
         const uploadedMimetype = meta?.mimetype ?? null;
@@ -157,6 +172,9 @@ export async function POST(
             // Fail open on quota-check errors so a Storage listing hiccup doesn't block uploads.
         }
 
+        // Only now — after the bytes are verified and within limits — is the DB row created, so a
+        // failed/abandoned upload never leaves an orphaned `documents` row. correlationId ties this
+        // row to its ingest job and structured logs across the web app and worker.
         const correlationId = uuidv4();
 
         const { data: document, error: insertError } = await supabase
@@ -180,6 +198,9 @@ export async function POST(
             );
         }
 
+        // Enqueue ingestion, but don't fail the request if it doesn't land: the row is already
+        // `pending`, so the reconcile cron can re-enqueue it later. Losing the job is recoverable;
+        // losing the row is not.
         const ingestPayload = createDocumentIngestPayload(
             documentId,
             correlationId,
@@ -200,6 +221,7 @@ export async function POST(
             }
         }
 
+        // Row exists and is queued (or will be reconciled): report success to the client.
         return NextResponse.json({
             success: true,
             document,

@@ -25,6 +25,7 @@ export async function POST(request: Request) {
     try {
         const supabase = await createClient();
 
+        // Authenticate via the session cookie; register is a session-only endpoint (no service role).
         const {
             data: { user },
             error: userError,
@@ -34,6 +35,7 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
         }
 
+        // Throttle per user so a runaway client (e.g. retry loop over many files) can't spam register.
         const rateLimit = checkRateLimit(
             `upload-register:${user.id}`,
             REGISTER_RATE_LIMIT,
@@ -46,6 +48,8 @@ export async function POST(request: Request) {
             );
         }
 
+        // Resolve the caller's org; the storage path is derived from this, never from client input,
+        // so a user can only ever register uploads under an org they belong to.
         const { data: membership, error: membershipError } = await supabase
             .from("memberships")
             .select("organization_id")
@@ -61,6 +65,8 @@ export async function POST(request: Request) {
 
         const organizationId = membership.organization_id;
 
+        // Body carries only file metadata (name/size/contentType) — the actual bytes go straight
+        // to Storage in a later step, so everything here is untrusted and must be validated.
         let body: unknown;
         try {
             body = await request.json();
@@ -83,6 +89,7 @@ export async function POST(request: Request) {
                 { status: 400 },
             );
         }
+        // size is the client-reported byte count; used only for a fast advisory rejection below.
         if (typeof size !== "number" || !Number.isFinite(size) || size <= 0) {
             return NextResponse.json({ error: "Missing or invalid file size" }, { status: 400 });
         }
@@ -100,6 +107,8 @@ export async function POST(request: Request) {
         const documentId = uuidv4();
         const storagePath = documentStoragePath(organizationId, documentId);
 
+        // No DB row is written yet — the `documents` row is inserted at /complete once bytes land,
+        // so an abandoned upload leaves no orphaned row. Return the target for the direct upload.
         return NextResponse.json({
             documentId,
             bucket: DOCUMENTS_BUCKET,
