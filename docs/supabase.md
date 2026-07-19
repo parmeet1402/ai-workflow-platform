@@ -145,6 +145,18 @@ docker rm -f $(docker ps -q --filter ancestor=public.ecr.aws/supabase/postgres:1
 
 ---
 
+## Storage policy hardening (`20260719160438_harden_documents_storage_policies.sql`)
+
+The baseline snapshot (`20260719150944_remote_schema.sql`) shipped a `storage.objects` INSERT policy (`"Users can upload documents flreew_0"`) that was `to public` with no path scoping — any caller, including `anon`, could write anywhere in the `documents` bucket. That was masked while only the server built upload paths from the session's organization; it became a live cross-org write risk once uploads moved to direct browser-to-Storage (resumable/TUS) uploads (see [document-management.md](document-management.md#upload-documents)).
+
+`20260719160438_harden_documents_storage_policies.sql` drops that policy and replaces it with:
+- `documents_insert_own_org` — `authenticated` only, first path segment (`{organization_id}/...`) must be an org the caller belongs to (via `public.memberships`).
+- `documents_update_own_org` — same scope, needed because resumable uploads `PATCH` the in-progress object.
+
+Apply it like any other migration (`supabase db push`), and remember `supabase config push` is required separately for the `file_size_limit` change in `config.toml` (see the warning above about `site_url`).
+
+---
+
 ## Command reference
 
 | Task | Command |

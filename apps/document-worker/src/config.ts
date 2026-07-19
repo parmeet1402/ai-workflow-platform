@@ -59,8 +59,11 @@ export function loadConfig(): WorkerConfig {
     supabaseServiceRoleKey: e.SUPABASE_SERVICE_ROLE_KEY.trim(),
     openaiApiKey: e.OPENAI_API_KEY.trim(),
     workerConcurrency: parseIntEnv(e.WORKER_CONCURRENCY, 1, 1, 16),
+    // Keep aligned with the Storage bucket's file_size_limit (supabase/config.toml).
     maxPdfBytes: parseIntEnv(e.MAX_PDF_BYTES, 50 * 1024 * 1024, 1_000_000, 200 * 1024 * 1024),
-    maxChunksPerDocument: parseIntEnv(e.MAX_CHUNKS_PER_DOCUMENT, 500, 1, 10_000),
+    // Chunks beyond this cap are truncated (not failed) by chunkPages; raised so larger
+    // documents (allowed now that uploads aren't capped at ~4.5MB) still index fully.
+    maxChunksPerDocument: parseIntEnv(e.MAX_CHUNKS_PER_DOCUMENT, 4_000, 1, 20_000),
     chunkSize: parseIntEnv(e.CHUNK_SIZE, 1500, 200, 32_000),
     chunkOverlap: parseIntEnv(e.CHUNK_OVERLAP, 200, 0, 8_000),
     embeddingModel: (e.EMBEDDING_MODEL ?? "text-embedding-3-small").trim(),

@@ -5,28 +5,40 @@ export type TextChunk = {
   metadata: { page: number };
 };
 
+export type ChunkPagesResult = {
+  chunks: TextChunk[];
+  /** True when the document had more chunks than `maxChunks`; remaining text was dropped. */
+  truncated: boolean;
+};
+
 /**
  * Character windows with overlap, tagged with the PDF page the text came from.
+ *
+ * Large documents are truncated at `maxChunks` rather than failing the whole ingest: a
+ * partially-indexed document (with `truncated: true` surfaced by the caller) is more useful
+ * than a `failed` one, and the cap exists to bound worker memory/time and RPC payload size.
  */
 export function chunkPages(
   pages: PageText[],
   chunkSize: number,
   overlap: number,
   maxChunks: number,
-): TextChunk[] {
+): ChunkPagesResult {
   if (overlap >= chunkSize) {
     throw new Error("CHUNK_OVERLAP must be less than CHUNK_SIZE");
   }
 
   const out: TextChunk[] = [];
+  let truncated = false;
 
-  for (const { page, text } of pages) {
+  outer: for (const { page, text } of pages) {
     if (text.length === 0) continue;
 
     let start = 0;
     while (start < text.length) {
       if (out.length >= maxChunks) {
-        throw new Error(`Exceeded MAX_CHUNKS_PER_DOCUMENT (${maxChunks})`);
+        truncated = true;
+        break outer;
       }
 
       const end = Math.min(start + chunkSize, text.length);
@@ -41,5 +53,5 @@ export function chunkPages(
     }
   }
 
-  return out;
+  return { chunks: out, truncated };
 }

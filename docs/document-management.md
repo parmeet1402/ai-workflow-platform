@@ -13,7 +13,12 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | Dashboard UI | `apps/web/src/app/dashboard/dashboard-documents.tsx` |
 | Document list types | `apps/web/src/types/document.ts` |
 | List | `apps/web/src/app/api/documents/route.ts` |
-| Upload | `apps/web/src/app/api/documents/upload/route.ts` |
+| Upload — register | `apps/web/src/app/api/documents/upload/route.ts` |
+| Upload — complete | `apps/web/src/app/api/documents/[documentId]/complete/route.ts` |
+| Upload — direct-to-Storage helper | `apps/web/src/lib/storage/resumable-upload.ts` |
+| Upload limits (shared client/server) | `apps/web/src/lib/documents/limits.ts` |
+| Per-org storage usage (quota) | `apps/web/src/lib/storage/org-usage.ts` |
+| Rate limiting (register/complete) | `apps/web/src/lib/rate-limit.ts` |
 | Ingest queue (Upstash) | `apps/web/src/lib/queue/redis-keys.ts`, `enqueue-document-ingest.ts`, `document-ingest-payload.ts` |
 | Ingest worker | `apps/document-worker/` — **BLPOP**, CAS claim, `unpdf` + OpenAI embed, RPC finalize/fail; migration `supabase/migrations/20260329120000_document_ingest_pipeline.sql` |
 | UTC helpers | `apps/web/src/lib/datetime.ts` |
@@ -35,6 +40,8 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | `UPSTASH_REDIS_REST_URL` | **Server only**. Upstash Redis REST URL for enqueueing ingest jobs after upload (`RPUSH` to `queue:ingest`). |
 | `UPSTASH_REDIS_REST_TOKEN` | **Server only**. Upstash REST token; do not use a `NEXT_PUBLIC_` prefix. |
 | `CRON_SECRET` | **Server only**, optional. Bearer secret for `GET /api/cron/reconcile-ingest` (Vercel Cron or manual). |
+| `MAX_UPLOAD_BYTES` | **Server only**, optional. Per-file cap for register/complete (default 50 MB); keep <= the Storage bucket's `file_size_limit`. |
+| `MAX_ORG_STORAGE_BYTES` | **Server only**, optional. Soft per-organization total-storage cap checked at `complete` time (default 5 GB). |
 
 **Document worker** (Railway / Render, not Vercel): `UPSTASH_REDIS_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENAI_API_KEY`, plus optional tuning vars documented in `apps/document-worker/README.md`.
 
@@ -58,7 +65,8 @@ flowchart LR
 
   subgraph API["Next.js API"]
     L[GET /api/documents]
-    U[POST …/upload]
+    U["POST /upload (register)"]
+    C["POST /:id/complete"]
     X[DELETE …/:id]
     O[GET …/open]
   end
@@ -70,11 +78,14 @@ flowchart LR
 
   D --> L
   D --> U
+  D -->|"direct TUS upload"| ST
+  D --> C
   D --> X
   D --> O
   L --> DB
-  U --> ST
   U --> DB
+  C --> ST
+  C --> DB
   X --> ST
   X --> DB
   O --> DB
@@ -103,8 +114,13 @@ flowchart TB
     CronTrigger[Vercel Cron or external]
   end
 
+  subgraph browserIngest [Browser]
+    Dash[Dashboard]
+  end
+
   subgraph nextIngest [Next.js API]
-    UploadRoute[POST upload]
+    UploadRoute["POST upload (register)"]
+    CompleteRoute["POST /:id/complete"]
     ReconcileRoute[GET reconcile-ingest]
   end
 
@@ -125,15 +141,19 @@ flowchart TB
   CronTrigger --> ReconcileRoute
   ReconcileRoute --> DbIngest
   ReconcileRoute --> QueueKey
-  UploadRoute --> StIngest
-  UploadRoute --> DbIngest
-  UploadRoute --> QueueKey
+  Dash --> UploadRoute
+  Dash -->|"direct TUS upload"| StIngest
+  Dash --> CompleteRoute
+  CompleteRoute --> StIngest
+  CompleteRoute --> DbIngest
+  CompleteRoute --> QueueKey
   QueueKey --> Proc
   Proc --> DbIngest
   Proc --> StIngest
   Proc --> OAI
 
   style schedLayer fill:#fef3c7,stroke:#ca8a04,stroke-width:2px
+  style browserIngest fill:#eef2ff,stroke:#6366f1,stroke-width:2px
   style nextIngest fill:#ecfdf5,stroke:#10b981,stroke-width:2px
   style supaIngest fill:#fff7ed,stroke:#ea580c,stroke-width:2px
   style redisLayer fill:#fce7f3,stroke:#db2777,stroke-width:2px
@@ -236,9 +256,17 @@ sequenceDiagram
 
 ## Upload documents
 
-The user is able to upload one or more PDFs (1–10 files, `application/pdf`, validated with Zod on the client). Each file is sent in its own `POST /api/documents/upload` as `multipart/form-data` with field **`file`**. The server generates a UUID, uploads to Storage at `{organization_id}/{id}.pdf`, then inserts the **`documents`** row.
+The user is able to upload one or more PDFs (1–10 files, `application/pdf`, validated with Zod on the client, capped at `MAX_UPLOAD_BYTES` — default **50 MB**, see `apps/web/src/lib/documents/limits.ts`). File **bytes never pass through the Next.js backend** — they upload directly from the browser to Supabase Storage's resumable (TUS) endpoint, so uploads are not bound by platform request-body limits (e.g. Vercel's ~4.5 MB) or Supabase's 6 MB standard-upload cap. This also keeps the API a small, typed JSON surface that a future Python backend could sit behind unchanged.
 
-**Response body:** `{ success: true, document: { ... } }`
+The flow is three steps per file:
+
+1. **Register** — `POST /api/documents/upload` with JSON `{ name, size, contentType }`. The server authenticates the user, resolves the organization, validates type/size (advisory — the real gate is server-side), and returns a **server-chosen** `{ documentId, bucket, storagePath }`. The client never picks where its file lands.
+2. **Upload** — the browser uploads the file directly to Supabase Storage's resumable endpoint (`tus-js-client`, 6 MB chunks, the user's own access token, `x-upsert: false` so an existing object can never be overwritten). Org-scoped Storage RLS policies (see [Document ingest pipeline](document-ingest-pipeline.md)) decide whether the write is allowed.
+3. **Complete** — `POST /api/documents/:documentId/complete` with `{ name }`. The server (service role) verifies the object actually landed at the expected path, re-checks size/type, enforces a soft per-organization storage quota (`MAX_ORG_STORAGE_BYTES`, computed by summing Storage object sizes since no byte-size column is tracked in Postgres), inserts the **`documents`** row (`pending`), and enqueues ingestion — the same as the old single-request route did after `storage.upload()`.
+
+Both `register` and `complete` are rate-limited per user (best-effort, in-memory).
+
+**Response bodies:** register → `{ documentId, bucket, storagePath, name }`; complete → `{ success: true, document: { ... } }`
 
 ```mermaid
 %%{init: {
@@ -254,18 +282,19 @@ The user is able to upload one or more PDFs (1–10 files, `application/pdf`, va
 sequenceDiagram
   autonumber
   participant UI as Dashboard
-  participant API as POST …/upload
-  participant SB as Supabase server
+  participant API as Next.js API
   participant ST as Storage
   participant DB as Postgres
 
-  UI->>API: multipart file
-  API->>SB: getUser
-  SB->>DB: membership
-  API->>SB: storage.upload
-  SB->>ST: PUT object
-  API->>SB: insert document
-  SB->>DB: INSERT
+  UI->>API: POST /upload {name,size,contentType}
+  API->>DB: getUser + membership
+  API-->>UI: {documentId, bucket, storagePath}
+  UI->>ST: TUS resumable upload (user token, x-upsert=false)
+  ST-->>UI: upload complete
+  UI->>API: POST /:id/complete {name}
+  API->>ST: verify object + size/type (service role)
+  API->>ST: sum org storage usage (quota)
+  API->>DB: insert document (pending)
   API-->>UI: 200 + document
 ```
 
@@ -368,7 +397,9 @@ sequenceDiagram
 | Action | HTTP | Notes |
 |--------|------|--------|
 | List | `GET /api/documents` | Session cookie; `Cache-Control: private, no-store` |
-| Upload | `POST /api/documents/upload` | `multipart/form-data`, field **`file`**, one PDF per request. Inserts `ingest_correlation_id` and **RPUSH**es to Upstash (`queue:ingest`) when Redis env is set. |
+| Upload — register | `POST /api/documents/upload` | JSON `{name,size,contentType}`. No file bytes. Returns a server-chosen `{documentId,bucket,storagePath}`. Rate-limited per user. |
+| Upload — bytes | *(direct to Storage)* | Browser → Supabase Storage resumable (TUS) endpoint; not an app API route. |
+| Upload — complete | `POST /api/documents/:documentId/complete` | JSON `{name}`. Verifies the object, checks quota, inserts the row (`ingest_correlation_id`), **RPUSH**es to Upstash (`queue:ingest`) when Redis env is set. Rate-limited per user. |
 | Reconcile ingest | `GET /api/cron/reconcile-ingest` | Optional safety net — see below. |
 | Open | `GET /api/documents/:documentId/open` | **302** to signed Storage URL |
 | Delete | `DELETE /api/documents/:documentId` | Storage object then DB row; JSON errors |

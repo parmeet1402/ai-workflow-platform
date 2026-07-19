@@ -117,7 +117,9 @@ enabled = true
 # The maximum file size allowed (e.g. "5MB", "500KB").
 file_size_limit = "50MiB"
 
-# Private bucket for uploaded PDFs. Access is granted only via server-signed URLs
+# Private bucket for uploaded PDFs. Uploads go directly from the browser to Storage via the
+# resumable (TUS) endpoint (see apps/web/src/lib/storage/resumable-upload.ts), authorized by
+# org-scoped RLS policies (see migrations); reads still only happen via server-signed URLs
 # (see apps/web/src/app/api/documents/[documentId]/open), never public reads.
 # Matches the app: PDF-only uploads, 50 MiB cap (worker MAX_PDF_BYTES default).
 [storage.buckets.documents]
@@ -152,9 +154,13 @@ max_catalogs = 2
 # Analytics Buckets is available to Supabase Pro plan.
 # [storage.analytics.buckets.my-warehouse]
 
-# Store vector embeddings in S3 for large and durable datasets
+# Store vector embeddings in S3 for large and durable datasets.
+# NOT USED by this project: embeddings live in Postgres via the pgvector extension
+# (public.document_chunks.embedding vector(1536)), not Storage Vector Buckets. That
+# feature requires a paid Supabase plan ("Please upgrade the project to a paid tier
+# to enable vector buckets"), so keep this disabled.
 [storage.vector]
-enabled = true
+enabled = false
 max_buckets = 10
 max_indexes = 5
 
@@ -173,7 +179,7 @@ enabled = true
 #
 # The base URL of your website. Used as an allow-list for redirects and for constructing URLs used
 # in emails.
-site_url = "http://127.0.0.1:3000"
+site_url = " https://ai-workflow-platform-web.vercel.app"
 # The public URL that Auth serves on. Defaults to the API external URL with `/auth/v1` appended.
 # external_url = ""
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.

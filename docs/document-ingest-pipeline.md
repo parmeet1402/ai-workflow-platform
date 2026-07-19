@@ -33,7 +33,8 @@ flowchart TB
   end
 
   subgraph nextApi [Next.js API routes]
-    Upload[POST upload]
+    Upload["POST upload (register)"]
+    Complete["POST /:id/complete"]
     Reconcile[GET reconcile-ingest]
   end
 
@@ -56,9 +57,11 @@ flowchart TB
   end
 
   Dash --> Upload
-  Upload --> Storage
-  Upload --> PgDocs
-  Upload --> IngestQueue
+  Dash -->|"direct TUS upload"| Storage
+  Dash --> Complete
+  Complete --> Storage
+  Complete --> PgDocs
+  Complete --> IngestQueue
   CronJob --> Reconcile
   Reconcile --> PgDocs
   Reconcile --> IngestQueue
@@ -77,7 +80,7 @@ flowchart TB
 
 **Paths**
 
-- **Upload (primary):** the web app authenticates the user, uploads bytes to Storage, inserts a **`documents`** row, and **RPUSH**es a small JSON job to **`queue:ingest`**.
+- **Upload (primary):** the web app authenticates the user and returns a server-chosen storage path (**register**); the browser then uploads bytes **directly to Storage** via the resumable (TUS) endpoint, bypassing the web app entirely; once bytes land, the browser calls **complete**, which inserts a **`documents`** row and **RPUSH**es a small JSON job to **`queue:ingest`**. See [Document management — Upload documents](document-management.md#upload-documents) for the full register/upload/complete sequence.
 - **Reconcile (optional recovery):** a **cron** (or any scheduler) calls **`GET /api/cron/reconcile-ingest`** with **`CRON_SECRET`**. The handler reads **stale `pending`** rows in Postgres and **RPUSH**es again so work is not lost if the first enqueue failed after insert.
 - **Worker:** consumes **`queue:ingest`** (e.g. `BRPOP` / `BLPOP`), loads the row by `documentId`, runs the pipeline, writes chunks and status, and calls **OpenAI** for embeddings (`OPENAI_API_KEY` stays on the worker only).
 
@@ -164,13 +167,15 @@ Baseline tables: `organizations`, `memberships`, `profiles`, `documents`, `docum
 
 | Route | Role in pipeline |
 |--------|-------------------|
-| `POST /api/documents/upload` | Authentication, org resolution, Storage upload, insert into `documents` (**pending**), generation of `correlationId`, **Redis enqueue** (with retries). |
+| `POST /api/documents/upload` | **Register.** Authentication, org resolution, type/size validation (advisory), per-user rate limit. Returns a server-chosen `{documentId, bucket, storagePath}`. No bytes, no DB write. |
+| *(direct to Storage)* | Browser uploads bytes to Supabase Storage's resumable (TUS) endpoint using the user's own access token; the API is not in this path. |
+| `POST /api/documents/:id/complete` | **Complete.** Authentication + org check, verifies the object exists at the expected path (service role), re-checks size/type, enforces a per-org storage quota, insert into `documents` (**pending**), generation of `correlationId`, **Redis enqueue** (with retries). |
 | `GET /api/documents` | The `select` list includes `processing_status`, `processing_error`, and `processed_at` for UI badges. |
 | `DELETE /api/documents/:id` | Behavior matches the current flow; chunks are removed via **`ON DELETE CASCADE`** after migration. |
 | `GET /api/documents/:id/open` | Unchanged. |
 | Optional `GET /api/cron/reconcile-ingest` | See [Reconcile cron job](#reconcile-cron-job-optional) below. |
 
-Relevant paths: `apps/web/src/app/api/documents/**`; an enqueue helper belongs under `apps/web/src/lib/queue/`.
+Relevant paths: `apps/web/src/app/api/documents/**`; an enqueue helper belongs under `apps/web/src/lib/queue/`; the direct-upload helper is `apps/web/src/lib/storage/resumable-upload.ts`; shared limits live in `apps/web/src/lib/documents/limits.ts`.
 
 ---
 
@@ -230,10 +235,12 @@ Run locally: `pnpm --filter document-worker dev` from the repo root. SQL: [`supa
 |----------|---------|
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | User-scoped client |
-| `SUPABASE_SERVICE_ROLE_KEY` | Optional; Storage and database when the user JWT is insufficient |
+| `SUPABASE_SERVICE_ROLE_KEY` | **Required for `complete`** (no Storage SELECT policy exists, so verifying the uploaded object needs the service role); also used by `open`/`delete` when the user JWT is insufficient |
 | `UPSTASH_REDIS_REST_URL` | Redis REST (enqueue from serverless) |
 | `UPSTASH_REDIS_REST_TOKEN` | Must not use the `NEXT_PUBLIC_` prefix |
 | `CRON_SECRET` | Optional; bearer token for `GET /api/cron/reconcile-ingest` (see [Reconcile cron job](#reconcile-cron-job-optional)) |
+| `MAX_UPLOAD_BYTES` | Optional; per-file cap for register/complete (default 50 MB) |
+| `MAX_ORG_STORAGE_BYTES` | Optional; soft per-organization total-storage cap checked at `complete` (default 5 GB) |
 
 `OPENAI_API_KEY` is not set on the web tier when only the worker performs embedding calls.
 
@@ -245,7 +252,7 @@ Run locally: `pnpm --filter document-worker dev` from the repo root. SQL: [`supa
 | `SUPABASE_URL` | **Required.** Same project URL as the web app. |
 | `SUPABASE_SERVICE_ROLE_KEY` | **Required.** Storage download + RPC finalize/fail. |
 | `OPENAI_API_KEY` | **Required.** Embeddings on the worker only. |
-| `WORKER_CONCURRENCY`, `MAX_PDF_BYTES`, `MAX_CHUNKS_PER_DOCUMENT`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | Optional guardrails (see worker `README.md`; DB uses **`vector(1536)`** today). |
+| `WORKER_CONCURRENCY`, `MAX_PDF_BYTES`, `MAX_CHUNKS_PER_DOCUMENT`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | Optional guardrails (see worker `README.md`; DB uses **`vector(1536)`** today). `MAX_PDF_BYTES` defaults to **50 MB** and should stay aligned with the Storage bucket's `file_size_limit` (`supabase/config.toml`). Documents with more than `MAX_CHUNKS_PER_DOCUMENT` chunks (default **4000**) are **truncated, not failed** — they still reach `ready`, with a `warn` log noting the truncation. |
 | `TZ=UTC` | Recommended so Node and Postgres session defaults interpret `now()` as UTC when writing **`timestamp without time zone`** (see below) |
 
 ---
@@ -445,12 +452,14 @@ WHERE table_schema = 'public'
 
 ## Implementation checklist
 
-- [ ] Supabase migrations: `documents` processing columns (`timestamp without time zone`, UTC convention), `document_chunks` + `vector`, RLS for chunks — see [`supabase/migrations/20260329120000_document_ingest_pipeline.sql`](../supabase/migrations/20260329120000_document_ingest_pipeline.sql).
+- [x] Supabase migrations: `documents` processing columns (`timestamp without time zone`, UTC convention), `document_chunks` + `vector`, RLS for chunks, `worker_finalize_document_ingest` / `worker_fail_document_processing` RPCs — see [`supabase/migrations/20260719150944_remote_schema.sql`](../supabase/migrations/20260719150944_remote_schema.sql) (baseline snapshot; see [supabase.md](supabase.md) for the versioned workflow).
 - [x] `enqueue-document-ingest.ts` and dependency `@upstash/redis`.
-- [x] Upload route: insert fields, enqueue, correlation id.
+- [x] Upload split into **register** (`upload/route.ts`) and **complete** (`[documentId]/complete/route.ts`); direct-to-Storage resumable upload (`lib/storage/resumable-upload.ts`, `tus-js-client`); insert fields, enqueue, correlation id happen in `complete`.
+- [x] Storage RLS hardened for direct browser uploads: org-scoped INSERT/UPDATE policies replacing the broad baseline policy — see [`supabase/migrations/20260719160438_harden_documents_storage_policies.sql`](../supabase/migrations/20260719160438_harden_documents_storage_policies.sql).
+- [x] Per-file size/type limits (`lib/documents/limits.ts`), per-org storage quota (`lib/storage/org-usage.ts`), and per-user rate limiting (`lib/rate-limit.ts`) on register/complete.
 - [x] List route: extended `select`.
-- [x] Worker package: Redis **BLPOP**, CAS claim, extract/chunk/embed, RPC transactional writes (`worker_finalize_document_ingest` / `worker_fail_document_processing`).
-- [x] Dashboard: status and polling.
+- [x] Worker package: Redis **BLPOP**, CAS claim, extract/chunk/embed, RPC transactional writes (`worker_finalize_document_ingest` / `worker_fail_document_processing`); oversized documents are truncated (not failed) at `MAX_CHUNKS_PER_DOCUMENT`.
+- [x] Dashboard: status and polling; per-file upload progress.
 - [x] Optional: reconcile cron and DLQ (Redis + route).
 - [x] [document-management.md](document-management.md) API fields for processing status.
 

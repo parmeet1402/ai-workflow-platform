@@ -84,9 +84,9 @@ export async function runDocumentIngest(
     const pages = await extractPdfPages(pdfBytes);
     logStructured(job, "extract", Date.now() - tEx, { pages: pages.length });
 
-    // Chunk text with overlap.
+    // Chunk text with overlap. Oversized documents are truncated, not failed (see chunkPages).
     const tCh = Date.now();
-    const textChunks = chunkPages(
+    const { chunks: textChunks, truncated } = chunkPages(
       pages,
       config.chunkSize,
       config.chunkOverlap,
@@ -94,7 +94,18 @@ export async function runDocumentIngest(
     );
     logStructured(job, "chunk", Date.now() - tCh, {
       chunks: textChunks.length,
+      truncated,
     });
+    if (truncated) {
+      console.log(
+        JSON.stringify({
+          correlationId: job.correlationId,
+          documentId: job.documentId,
+          stage: "warn",
+          message: `Document exceeded MAX_CHUNKS_PER_DOCUMENT (${config.maxChunksPerDocument}); indexing the first ${textChunks.length} chunks only`,
+        }),
+      );
+    }
 
     if (textChunks.length === 0) {
       // Claimed processing; mark failed so the row is not stuck.

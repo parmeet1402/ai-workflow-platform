@@ -18,6 +18,10 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import type { DocumentListItem, ProcessingStatus } from "@/types/document";
+import { MAX_UPLOAD_BYTES, ALLOWED_CONTENT_TYPE } from "@/lib/documents/limits";
+import { uploadFileResumable } from "@/lib/storage/resumable-upload";
+
+const MAX_UPLOAD_MB = Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024));
 
 function documentSubtitle(doc: DocumentListItem): string {
   if (doc.created_at) {
@@ -91,8 +95,12 @@ const FileArraySchema = z
   .min(1, "Select at least one PDF file.")
   .max(10, "Select up to 10 files.")
   .refine(
-    (files) => files.every((file) => file.type === "application/pdf"),
+    (files) => files.every((file) => file.type === ALLOWED_CONTENT_TYPE),
     "Only PDF files are allowed.",
+  )
+  .refine(
+    (files) => files.every((file) => file.size <= MAX_UPLOAD_BYTES),
+    `Each file must be ${MAX_UPLOAD_MB}MB or smaller.`,
   );
 
 const UploadSchema = z.object({
@@ -104,10 +112,28 @@ type UploadDocumentFromApi = Pick<
   "id" | "name" | "storage_path" | "processing_status"
 >;
 
+type RegisterResponse =
+  | { documentId: string; bucket: string; storagePath: string; name: string }
+  | { error: string };
+
+type CompleteResponse =
+  | { success: true; document: UploadDocumentFromApi }
+  | { error: string };
+
+/** Progress for one in-flight upload, keyed by a stable per-file id (name + size + lastModified). */
+type UploadProgress = { fileName: string; percent: number };
+
+function fileKey(file: File): string {
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
+
 export default function DashboardDocuments() {
   const queryClient = useQueryClient();
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const [selectedCount, setSelectedCount] = React.useState(0);
+  const [uploadProgress, setUploadProgress] = React.useState<
+    Record<string, UploadProgress>
+  >({});
 
   const {
     data: documents = [],
@@ -157,32 +183,80 @@ export default function DashboardDocuments() {
       const uploaded: UploadDocumentFromApi[] = [];
 
       for (const file of files) {
-        const formData = new FormData();
-        // The API expects a `multipart/form-data` field named `file`.
-        formData.append("file", file);
+        const key = fileKey(file);
+        setUploadProgress((prev) => ({
+          ...prev,
+          [key]: { fileName: file.name, percent: 0 },
+        }));
 
-        const res = await fetch("/api/documents/upload", {
-          method: "POST",
-          body: formData,
-          credentials: "include",
-        });
+        try {
+          // 1. Register: get a server-chosen documentId + storage path (no bytes sent yet).
+          const registerRes = await fetch("/api/documents/upload", {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: file.name,
+              size: file.size,
+              contentType: file.type,
+            }),
+          });
+          const registerData = (await registerRes.json()) as RegisterResponse;
+          if (!registerRes.ok || "error" in registerData) {
+            throw new Error(
+              "error" in registerData
+                ? registerData.error
+                : `Could not register ${file.name}`,
+            );
+          }
 
-        type ApiResponse =
-          | { success: true; document: UploadDocumentFromApi }
-          | { error: string };
-        const data = (await res.json()) as ApiResponse;
+          // 2. Upload bytes directly to Supabase Storage (resumable), bypassing the API.
+          await uploadFileResumable(
+            file,
+            {
+              bucket: registerData.bucket,
+              storagePath: registerData.storagePath,
+              contentType: file.type,
+            },
+            (bytesUploaded, bytesTotal) => {
+              const percent =
+                bytesTotal > 0
+                  ? Math.round((bytesUploaded / bytesTotal) * 100)
+                  : 0;
+              setUploadProgress((prev) => ({
+                ...prev,
+                [key]: { fileName: file.name, percent },
+              }));
+            },
+          );
 
-        if (!res.ok) {
-          if ("error" in data) throw new Error(data.error);
-          throw new Error(`Upload failed for ${file.name}`);
+          // 3. Complete: persist metadata and enqueue ingestion now that bytes have landed.
+          const completeRes = await fetch(
+            `/api/documents/${registerData.documentId}/complete`,
+            {
+              method: "POST",
+              credentials: "include",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: registerData.name }),
+            },
+          );
+          const completeData = (await completeRes.json()) as CompleteResponse;
+          if (!completeRes.ok || "error" in completeData || !completeData.success) {
+            throw new Error(
+              "error" in completeData
+                ? completeData.error
+                : `Upload failed for ${file.name}`,
+            );
+          }
+
+          uploaded.push(completeData.document);
+        } finally {
+          setUploadProgress((prev) => {
+            const next = { ...prev };
+            delete next[key];
+            return next;
+          });
         }
-
-        if (!("success" in data) || !data.success) {
-          if ("error" in data) throw new Error(data.error);
-          throw new Error(`Upload failed for ${file.name}`);
-        }
-
-        uploaded.push(data.document);
       }
 
       return uploaded;
@@ -205,6 +279,8 @@ export default function DashboardDocuments() {
       });
     },
   });
+
+  const activeUploads = Object.values(uploadProgress);
 
   const onSubmit = async (values: UploadFormValues) => {
     uploadMutation.mutate(values.files);
@@ -276,6 +352,27 @@ export default function DashboardDocuments() {
 
             {errors.files ? (
               <p className="text-sm text-destructive">{errors.files.message}</p>
+            ) : null}
+
+            {activeUploads.length > 0 ? (
+              <div className="space-y-2">
+                {activeUploads.map((progress) => (
+                  <div key={progress.fileName} className="space-y-1">
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span className="truncate">{progress.fileName}</span>
+                      <span className="shrink-0 tabular-nums">
+                        {progress.percent}%
+                      </span>
+                    </div>
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary transition-[width]"
+                        style={{ width: `${progress.percent}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
             ) : null}
 
             <div className="flex justify-end gap-2">

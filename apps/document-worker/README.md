@@ -29,8 +29,8 @@ Key names must match `apps/web/src/lib/queue/redis-keys.ts`.
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | Service role (bypasses RLS; Storage + RPC). |
 | `OPENAI_API_KEY` | Yes | Embeddings only on the worker. |
 | `WORKER_CONCURRENCY` | No | Parallel Redis consumers (default `1`, max `16`). |
-| `MAX_PDF_BYTES` | No | Default 50 MiB. |
-| `MAX_CHUNKS_PER_DOCUMENT` | No | Default 500. |
+| `MAX_PDF_BYTES` | No | Default 50 MiB; keep aligned with the Storage bucket's `file_size_limit` in `supabase/config.toml`. |
+| `MAX_CHUNKS_PER_DOCUMENT` | No | Default 4000. Chunks beyond this cap are truncated, not failed — the document still reaches `ready` with a `warn` log noting truncation. |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | No | Character windows (default 1500 / 200). |
 | `EMBEDDING_MODEL` | No | Default `text-embedding-3-small`. |
 | `EMBEDDING_DIMENSIONS` | No | Default **1536** (must match DB `vector(1536)`). |
