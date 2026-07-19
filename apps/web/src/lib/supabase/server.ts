@@ -1,6 +1,14 @@
 import { createServerClient } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
+/**
+ * Supabase client for Server Components and Route Handlers, which read
+ * cookies via `next/headers` instead of a middleware request/response.
+ *
+ * Server Components cannot set cookies during rendering, so this client only
+ * consumes the session; token refresh is handled by the middleware client in
+ * src/proxy.ts, which runs first on every request.
+ */
 export async function createClient() {
   const cookieStore = await cookies();
 
