@@ -1,0 +1,11 @@
+# Supabase
+.branches
+.temp
+
+# Secrets referenced by config.toml (never commit)
+signing_keys.json
+
+# dotenvx
+.env.keys
+.env.local
+.env.*.local
