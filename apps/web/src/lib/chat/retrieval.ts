@@ -31,6 +31,9 @@ export async function retrieveRelevantChunks(options: {
   matchCount?: number;
   client?: OpenAI;
 }): Promise<RetrievedChunk[]> {
+  // This function is used to retrieve the relevant chunks from the database.
+  // Input: The organization ID, the user's question, and the number of chunks to retrieve.
+  // Output: The relevant chunks.
   const {
     organizationId,
     query,
@@ -38,12 +41,29 @@ export async function retrieveRelevantChunks(options: {
     client = createOpenAIClient(),
   } = options;
 
+  // create the vector embedding for the query.
   const embedding = await createQueryEmbedding(query, client);
+  // convert the embedding to a vector literal for the SQL query.
   const vectorLiteral = toVectorLiteral(embedding);
   const sql = getSql();
 
-  // Parameterized KNN: cosine distance via `<=>` (HNSW uses vector_cosine_ops).
-  // Similarity = 1 − distance so higher is better.
+  // Cosine KNN over chunk embeddings (pgvector `<=>`; HNSW index uses vector_cosine_ops).
+  // Cast the query vector to vector(1536) to match document_chunks.embedding.
+  // Similarity = 1 − distance (higher is closer). ORDER BY distance ASC, then take top-k.
+  //
+  // INNER JOIN documents ON d.id = dc.document_id:
+  // - Each chunk row only exists for a parent document; the join attaches that parent.
+  // - INNER (not LEFT) drops orphan chunks if a document were missing (shouldn't happen).
+  // - organization_id and processing_status live on documents, not chunks — we need the
+  //   join to scope retrieval to this org and only include fully ingested ("ready") docs.
+  // - d.name is selected as document_name for citation labels in the chat UI.
+
+  // dc here is the chunk table.
+  // d here is the document table.
+  // (1 - (dc.embedding <=> ${vectorLiteral}::public.vector(1536)))::float8 AS similarity here is the similarity score between the chunk embedding and the query embedding.
+  // ::float8 here means the similarity score is casted to float8.
+  // ::uuid here means the organization ID is a UUID.
+  // ::public.vector(1536) here means the embedding is a vector of 1536 dimensions.
   const rows = await sql<MatchRow[]>`
     SELECT
       dc.document_id,

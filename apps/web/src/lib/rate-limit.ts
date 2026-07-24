@@ -13,6 +13,7 @@ const hits = new Map<string, number[]>();
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 let lastSweepAt = 0;
 
+/** Sweep the map of keys with no recent hits so the map does not grow unbounded. */
 function sweep(now: number): void {
   if (now - lastSweepAt < SWEEP_INTERVAL_MS) return;
   lastSweepAt = now;
