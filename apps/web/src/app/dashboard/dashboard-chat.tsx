@@ -1,10 +1,15 @@
 "use client";
 
 import * as React from "react";
+import { useMutation } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { FileText, MessageSquare, SendIcon } from "lucide-react";
+import { MessageSquare, SendIcon } from "lucide-react";
+import type { ChatCitation, ChatUsage } from "@/lib/chat/types";
+
+const INITIAL_ASSISTANT_ID = "assistant-initial";
 
 type ChatMessage = {
   id: string;
@@ -12,46 +17,106 @@ type ChatMessage = {
   content: string;
 };
 
+type ChatApiSuccess = {
+  answer: string;
+  citations: ChatCitation[];
+  usage: ChatUsage;
+};
+
+type ChatApiError = {
+  error: string;
+};
+
+function newMessageId(prefix: string) {
+  return crypto?.randomUUID?.() ?? `${prefix}-${Date.now()}`;
+}
+
+function toApiMessages(messages: ChatMessage[]) {
+  return messages
+    .filter((m) => m.id !== INITIAL_ASSISTANT_ID)
+    .map(({ role, content }) => ({ role, content }));
+}
+
 export default function DashboardChat() {
   const [messages, setMessages] = React.useState<ChatMessage[]>([
     {
-      id: "assistant-initial",
+      id: INITIAL_ASSISTANT_ID,
       role: "assistant",
       content: "Upload documents on the left, then ask questions here.",
     },
   ]);
   const [input, setInput] = React.useState("");
-  const [isThinking, setIsThinking] = React.useState(false);
-  const chatHistory = [
-    { id: "hist-1", title: "Onboarding Q&A", lastMessage: "How do I upload PDFs?" },
-    { id: "hist-2", title: "Pricing Discussion", lastMessage: "Show token cost breakdown" },
-    { id: "hist-3", title: "RAG Setup", lastMessage: "How do I chunk documents?" },
-    { id: "hist-4", title: "Prompt Tuning", lastMessage: "Refine summarization prompt" },
-  ];
 
-  const onSubmit = async (e: React.FormEvent) => {
+  const chatMutation = useMutation({
+    mutationFn: async (apiMessages: Array<{ role: "user" | "assistant"; content: string }>) => {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: apiMessages }),
+      });
+
+      const data = (await res.json()) as ChatApiSuccess | ChatApiError;
+      if (!res.ok || "error" in data) {
+        throw new Error(
+          "error" in data && data.error
+            ? data.error
+            : "Chat request failed",
+        );
+      }
+      return data;
+    },
+    onSuccess: (data) => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: newMessageId("assistant"),
+          role: "assistant",
+          content: data.answer,
+        },
+      ]);
+    },
+    onError: (error) => {
+      toast.error("Chat failed", {
+        description:
+          error instanceof Error ? error.message : "Could not get a response",
+      });
+    },
+  });
+
+  const isThinking = chatMutation.isPending;
+
+  // Session-only history: one entry for the current in-memory conversation.
+  const sessionHistory = React.useMemo(() => {
+    const userMessages = messages.filter((m) => m.role === "user");
+    if (userMessages.length === 0) return [];
+
+    const firstUser = userMessages[0]!;
+    const last = messages[messages.length - 1]!;
+    return [
+      {
+        id: "session-current",
+        title: firstUser.content,
+        lastMessage: last.content,
+      },
+    ];
+  }, [messages]);
+
+  const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = input.trim();
     if (!trimmed || isThinking) return;
 
-    setInput("");
-    setMessages((prev) => [
-      ...prev,
-      { id: (crypto?.randomUUID?.() ?? `user-${Date.now()}`), role: "user", content: trimmed },
-    ]);
+    const userMessage: ChatMessage = {
+      id: newMessageId("user"),
+      role: "user",
+      content: trimmed,
+    };
+    const nextMessages = [...messages, userMessage];
 
-    setIsThinking(true);
-    // Placeholder assistant response. Replace with your real chat call.
-    await new Promise((r) => setTimeout(r, 500));
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: (crypto?.randomUUID?.() ?? `assistant-${Date.now()}`),
-        role: "assistant",
-        content: "Got it. This is a placeholder response for the dashboard chat UI.",
-      },
-    ]);
-    setIsThinking(false);
+    setInput("");
+    setMessages(nextMessages);
+    chatMutation.mutate(toApiMessages(nextMessages));
   };
 
   return (
@@ -109,14 +174,14 @@ export default function DashboardChat() {
         </CardHeader>
         <CardContent className="min-h-0">
           <div className="max-h-full space-y-2 overflow-y-auto pr-2">
-            {chatHistory.length === 0 ? (
+            {sessionHistory.length === 0 ? (
               <div className="flex min-h-[8rem] flex-col items-center justify-center gap-2 rounded-lg border bg-background/50 px-3 py-6 text-center text-sm text-muted-foreground">
                 <MessageSquare className="size-4" />
                 <div>No chat history yet.</div>
                 <div className="text-xs">Start a conversation to see it here.</div>
               </div>
             ) : (
-              chatHistory.map((item) => (
+              sessionHistory.map((item) => (
                 <button
                   key={item.id}
                   type="button"
@@ -135,4 +200,3 @@ export default function DashboardChat() {
     </div>
   );
 }
-
