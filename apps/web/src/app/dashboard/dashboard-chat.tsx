@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { FileText, MessageSquare, SendIcon } from "lucide-react";
+import { FileText, MessageSquare, RefreshCw, SendIcon } from "lucide-react";
 import { readChatSse } from "@/lib/chat/read-sse";
 import type { ChatCitation, ChatUsage } from "@/lib/chat/types";
 import { useChatSession } from "./chat-session-context";
@@ -32,6 +32,20 @@ function toApiMessages(messages: ChatMessage[]) {
   return messages
     .filter((m) => m.id !== INITIAL_ASSISTANT_ID)
     .map(({ role, content }) => ({ role, content }));
+}
+
+/** Last turn is a real assistant reply that can be regenerated from its preceding user message. */
+function getRegenerateTarget(messages: ChatMessage[]) {
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== "assistant" || last.id === INITIAL_ASSISTANT_ID) {
+    return null;
+  }
+
+  const prior = messages.slice(0, -1);
+  const lastUser = [...prior].reverse().find((m) => m.role === "user");
+  if (!lastUser) return null;
+
+  return { assistantId: last.id, priorMessages: prior };
 }
 
 function citationLabel(citation: ChatCitation) {
@@ -255,6 +269,20 @@ export default function DashboardChat() {
     void streamChat(toApiMessages(nextMessages));
   };
 
+  // Drop the last assistant turn and re-stream from the prior messages (same SSE path).
+  // Session token total recomputes from remaining message usages (old reply removed, new usage added).
+  const onRegenerate = () => {
+    if (isStreaming) return;
+
+    const target = getRegenerateTarget(messages);
+    if (!target) return;
+
+    setMessages(target.priorMessages);
+    void streamChat(toApiMessages(target.priorMessages));
+  };
+
+  const regenerateTarget = isStreaming ? null : getRegenerateTarget(messages);
+
   return (
     <div className="grid h-full min-h-0 flex-1 grid-cols-[7fr_3fr] gap-4">
       <Card className="flex min-h-0 flex-1 flex-col">
@@ -284,8 +312,23 @@ export default function DashboardChat() {
                         : "bg-background",
                     ].join(" ")}
                   >
-                    <div className="mb-1 text-xs font-medium text-muted-foreground">
-                      {m.role === "user" ? "You" : "Assistant"}
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <div className="text-xs font-medium text-muted-foreground">
+                        {m.role === "user" ? "You" : "Assistant"}
+                      </div>
+                      {regenerateTarget?.assistantId === m.id ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs text-muted-foreground"
+                          onClick={onRegenerate}
+                          disabled={isStreaming}
+                        >
+                          <RefreshCw className="size-3" />
+                          Regenerate
+                        </Button>
+                      ) : null}
                     </div>
                     <div className="whitespace-pre-wrap">{m.content}</div>
                     {m.role === "assistant" && m.usage ? (

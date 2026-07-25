@@ -237,8 +237,8 @@ UI: `apps/web/src/app/dashboard/dashboard-chat.tsx`. Client parser: `readChatSse
 }}%%
 flowchart TB
   subgraph Client["Browser"]
-    Submit[User submit]
-    AppendUser[Append user message]
+    Submit[User submit / Regenerate]
+    AppendUser[Append user message or drop last assistant]
     Placeholder[Append empty assistant bubble]
     Fetch["fetch POST /api/chat"]
     Branch{Content-Type SSE?}
@@ -271,6 +271,13 @@ flowchart TB
    - `done` → success
 6. On abort (unmount or superseded request), ignore follow-up errors; release the reader.
 
+### Regenerate
+
+- A **Regenerate** control appears on the **last** assistant message only (not the welcome placeholder).
+- Clicking it drops that assistant turn and re-POSTs the prior messages through the same `streamChat` path (fresh retrieval + completion).
+- Disabled while `isStreaming` is true (same concurrency guard as send).
+- Session token total stays correct because the footer sum is derived from message `usage` values: removing the old reply subtracts its tokens; the new `usage` event adds the replacement.
+
 ### Token usage (session)
 
 - Each assistant reply shows its `usage.totalTokens` once the `usage` event arrives.
@@ -298,7 +305,8 @@ Shipped relative to the Phase 1 plan:
 
 - Org-scoped RAG ask + **streaming** SSE (backend + incremental UI).
 - **Sources** under each assistant reply: deduped citations (`documentId` + page) link to `/api/documents/:id/open`. Hidden when retrieval returned no chunks.
-- **Token usage** per assistant reply + session aggregate in the budget footer (provider usage with estimate fallback). Regenerate and durable conversations are follow-ups.
+- **Token usage** per assistant reply + session aggregate in the budget footer (provider usage with estimate fallback).
+- **Regenerate** on the last assistant turn (re-streams; session usage replaces the old reply’s tokens). Durable conversations remain a follow-up.
 
 | Checkpoint | Status |
 |------------|--------|
@@ -306,7 +314,7 @@ Shipped relative to the Phase 1 plan:
 | CP2 Streaming API + client reader | Done |
 | CP3 Sources UI (links to `/api/documents/:id/open`) | Done |
 | CP4 Token usage in footer / per-message display | Done |
-| CP5 Regenerate last turn | Pending |
+| CP5 Regenerate last turn | Done |
 | CP6 Persist conversations / messages | Optional / pending |
 
 ---
