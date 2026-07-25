@@ -17,6 +17,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { useChatSession } from "./chat-session-context";
 
 const tokenBudgetSchema = z.object({
   tokenBudget: z
@@ -82,17 +83,12 @@ function RadialUsageChart({ used, budget }: { used: number; budget: number }) {
   );
 }
 
-export default function TokenBudgetFooter({
-  tokensUsed,
-  initialTokenBudget,
-  costPerThousandTokens,
-}: {
-  tokensUsed: number;
-  initialTokenBudget: number;
-  costPerThousandTokens: number;
-}) {
+export default function TokenBudgetFooter() {
+  const { sessionTokensUsed, initialTokenBudget, costPerThousandTokens } =
+    useChatSession();
   const [open, setOpen] = React.useState(false);
   const [tokenBudget, setTokenBudget] = React.useState(initialTokenBudget);
+  const tokensUsed = sessionTokensUsed;
 
   const {
     register,

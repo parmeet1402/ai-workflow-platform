@@ -30,6 +30,9 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | Shared types (citations, usage, SSE) | `apps/web/src/lib/chat/types.ts` |
 | Server SSE framing | `apps/web/src/lib/chat/sse.ts` |
 | Client SSE reader | `apps/web/src/lib/chat/read-sse.ts` |
+| Usage estimate fallback | `apps/web/src/lib/chat/estimate-usage.ts` |
+| Session token context | `apps/web/src/app/dashboard/chat-session-context.tsx` |
+| Token budget footer | `apps/web/src/app/dashboard/token-budget-footer.tsx` |
 | Server Postgres client | `apps/web/src/lib/db/postgres.ts` |
 | Rate limiting | `apps/web/src/lib/rate-limit.ts` |
 | HNSW index on embeddings | `supabase/migrations/20260720003050_match_document_chunks_rpc.sql` (index retained; any early RPC dropped later) |
@@ -180,7 +183,7 @@ After retrieval, the handler returns `Content-Type: text/event-stream` and a `Re
 
 1. Calls `chat.completions.create({ stream: true, stream_options: { include_usage: true } })` with `request.signal`.
 2. For each chunk with `delta.content`, enqueues `delta`.
-3. Captures `usage` from the final provider chunk when present.
+3. Captures `usage` from the final provider chunk when present (`stream_options.include_usage`). If the provider omits usage (or returns zeros), falls back to a chars/4 estimate over the RAG prompt texts + accumulated completion (`estimateChatUsage`).
 4. If the client aborted, closes without terminal events.
 5. If no text arrived, enqueues `error` (`Empty completion from model`).
 6. Otherwise enqueues `citations` → `usage` → `done`, then closes.
@@ -263,10 +266,16 @@ flowchart TB
 5. Otherwise `readChatSse` buffers network chunks, splits on `\n\n`, and dispatches typed events:
    - `delta` → append text to the assistant bubble
    - `citations` → patch that message and render a compact **Sources** list (document name + optional page) linking to `/api/documents/:id/open` in a new tab; omitted when the array is empty
-   - `usage` → patch that message (token UI in a later checkpoint)
+   - `usage` → patch that message; show per-reply token count; recompute session sum into `ChatSessionProvider` for the budget footer
    - `error` → fail the turn (remove empty assistant, toast)
    - `done` → success
 6. On abort (unmount or superseded request), ignore follow-up errors; release the reader.
+
+### Token usage (session)
+
+- Each assistant reply shows its `usage.totalTokens` once the `usage` event arrives.
+- `ChatSessionProvider` wraps the dashboard; `sessionTokensUsed` is the sum of message totals for the current browser session.
+- `TokenBudgetFooter` reads that sum (client-state driven). Budget editing and cost (`tokensUsed / 1000 * costPerThousandTokens`) stay local to the footer; defaults are `initialTokenBudget = 1000` and `costPerThousandTokens = 0.01`.
 
 `EventSource` is not used because the request is a **POST** with a JSON body.
 
@@ -289,14 +298,14 @@ Shipped relative to the Phase 1 plan:
 
 - Org-scoped RAG ask + **streaming** SSE (backend + incremental UI).
 - **Sources** under each assistant reply: deduped citations (`documentId` + page) link to `/api/documents/:id/open`. Hidden when retrieval returned no chunks.
-- Usage is **emitted on the wire** and stored on the in-memory assistant message; token-budget footer wiring, regenerate, and durable conversations are follow-ups.
+- **Token usage** per assistant reply + session aggregate in the budget footer (provider usage with estimate fallback). Regenerate and durable conversations are follow-ups.
 
 | Checkpoint | Status |
 |------------|--------|
 | CP1 Non-streaming RAG → evolved into streaming route | Done (superseded by CP2 shape) |
 | CP2 Streaming API + client reader | Done |
 | CP3 Sources UI (links to `/api/documents/:id/open`) | Done |
-| CP4 Token usage in footer / per-message display | Pending |
+| CP4 Token usage in footer / per-message display | Done |
 | CP5 Regenerate last turn | Pending |
 | CP6 Persist conversations / messages | Optional / pending |
 

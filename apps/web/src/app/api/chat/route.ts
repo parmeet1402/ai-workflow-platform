@@ -3,6 +3,10 @@ import {
   chunksToCitations,
 } from "@/lib/chat/prompt";
 import {
+  estimateChatUsage,
+  hasProviderUsage,
+} from "@/lib/chat/estimate-usage";
+import {
   createOpenAIClient,
   getChatModel,
 } from "@/lib/chat/openai";
@@ -169,6 +173,7 @@ export async function POST(request: Request) {
       client: openai,
     });
     const citations = chunksToCitations(chunks);
+    const ragMessages = buildRagMessages({ question, chunks });
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
@@ -185,7 +190,7 @@ export async function POST(request: Request) {
           const completion = await openai.chat.completions.create(
             {
               model: getChatModel(),
-              messages: buildRagMessages({ question, chunks }),
+              messages: ragMessages,
               stream: true,
               stream_options: { include_usage: true },
             },
@@ -194,6 +199,7 @@ export async function POST(request: Request) {
 
           // sawDelta is used to check if the stream of data from the server has a delta.
           let sawDelta = false;
+          let completionText = "";
           // usage is used to store the usage of the stream of data from the server.
           let usage: ChatUsage = {
             promptTokens: 0,
@@ -209,15 +215,19 @@ export async function POST(request: Request) {
             const text = chunk.choices[0]?.delta?.content;
             if (text) {
               sawDelta = true;
+              completionText += text;
               enqueue({ type: "delta", text });
             }
 
             const usageRaw = chunk.usage;
             if (usageRaw) {
+              const promptTokens = usageRaw.prompt_tokens ?? 0;
+              const completionTokens = usageRaw.completion_tokens ?? 0;
               usage = {
-                promptTokens: usageRaw.prompt_tokens ?? 0,
-                completionTokens: usageRaw.completion_tokens ?? 0,
-                totalTokens: usageRaw.total_tokens ?? 0,
+                promptTokens,
+                completionTokens,
+                totalTokens:
+                  usageRaw.total_tokens ?? promptTokens + completionTokens,
               };
             }
           }
@@ -231,6 +241,13 @@ export async function POST(request: Request) {
             enqueue({ type: "error", error: "Empty completion from model" });
             controller.close();
             return;
+          }
+
+          if (!hasProviderUsage(usage)) {
+            usage = estimateChatUsage({
+              promptTexts: ragMessages.map((m) => m.content),
+              completionText,
+            });
           }
 
           enqueue({ type: "citations", citations });

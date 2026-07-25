@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { FileText, MessageSquare, SendIcon } from "lucide-react";
 import { readChatSse } from "@/lib/chat/read-sse";
 import type { ChatCitation, ChatUsage } from "@/lib/chat/types";
+import { useChatSession } from "./chat-session-context";
 
 const INITIAL_ASSISTANT_ID = "assistant-initial";
 
@@ -36,6 +37,10 @@ function toApiMessages(messages: ChatMessage[]) {
 function citationLabel(citation: ChatCitation) {
   if (citation.page == null) return citation.documentName;
   return `${citation.documentName} · p. ${citation.page}`;
+}
+
+function formatMessageTokens(usage: ChatUsage) {
+  return `${usage.totalTokens.toLocaleString()} tokens`;
 }
 
 function MessageSources({ citations }: { citations: ChatCitation[] }) {
@@ -67,6 +72,7 @@ function MessageSources({ citations }: { citations: ChatCitation[] }) {
 }
 
 export default function DashboardChat() {
+  const { setSessionTokensUsed } = useChatSession();
   const [messages, setMessages] = React.useState<ChatMessage[]>([
     {
       id: INITIAL_ASSISTANT_ID,
@@ -84,6 +90,15 @@ export default function DashboardChat() {
       abortRef.current?.abort();
     };
   }, []);
+
+  // Keep the budget footer in sync with the sum of per-message totals.
+  React.useEffect(() => {
+    const total = messages.reduce(
+      (sum, m) => sum + (m.usage?.totalTokens ?? 0),
+      0,
+    );
+    setSessionTokensUsed(total);
+  }, [messages, setSessionTokensUsed]);
 
   // Session-only history: one entry for the current in-memory conversation.
   const sessionHistory = React.useMemo(() => {
@@ -273,6 +288,11 @@ export default function DashboardChat() {
                       {m.role === "user" ? "You" : "Assistant"}
                     </div>
                     <div className="whitespace-pre-wrap">{m.content}</div>
+                    {m.role === "assistant" && m.usage ? (
+                      <div className="mt-1.5 text-xs text-muted-foreground">
+                        {formatMessageTokens(m.usage)}
+                      </div>
+                    ) : null}
                     {m.role === "assistant" && m.citations ? (
                       <MessageSources citations={m.citations} />
                     ) : null}
