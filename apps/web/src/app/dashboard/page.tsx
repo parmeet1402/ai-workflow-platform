@@ -10,10 +10,39 @@ import {
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { SettingsIcon } from "lucide-react";
-import { ChatSessionProvider } from "./chat-session-context";
+import {
+    ChatSessionProvider,
+    DEFAULT_TOKEN_BUDGET,
+} from "./chat-session-context";
 import DashboardChat from "./dashboard-chat";
 import DashboardDocuments from "./dashboard-documents";
 import TokenBudgetFooter from "./token-budget-footer";
+
+async function loadOrgTokenBudget(
+    supabase: Awaited<ReturnType<typeof createClient>>,
+    userId: string,
+): Promise<number> {
+    const { data: membership } = await supabase
+        .from("memberships")
+        .select("organization_id")
+        .eq("user_id", userId)
+        .maybeSingle();
+
+    if (!membership?.organization_id) {
+        return DEFAULT_TOKEN_BUDGET;
+    }
+
+    const { data: org } = await supabase
+        .from("organizations")
+        .select("token_budget")
+        .eq("id", membership.organization_id)
+        .maybeSingle();
+
+    const budget = org?.token_budget;
+    return typeof budget === "number" && budget >= 1
+        ? budget
+        : DEFAULT_TOKEN_BUDGET;
+}
 
 export default async function Dashboard() {
     const supabase = await createClient();
@@ -26,8 +55,10 @@ export default async function Dashboard() {
         redirect("/login");
     }
 
+    const initialTokenBudget = await loadOrgTokenBudget(supabase, user.id);
+
     return (
-        <ChatSessionProvider>
+        <ChatSessionProvider initialTokenBudget={initialTokenBudget}>
             <div className="flex h-screen flex-col gap-4 p-6">
                 <header className="flex items-center justify-between">
                     <div className="text-lg font-semibold">AI Workflow Platform</div>

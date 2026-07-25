@@ -5,6 +5,7 @@ import { z } from "zod";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Pencil } from "lucide-react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -84,10 +85,13 @@ function RadialUsageChart({ used, budget }: { used: number; budget: number }) {
 }
 
 export default function TokenBudgetFooter() {
-  const { sessionTokensUsed, initialTokenBudget, costPerThousandTokens } =
-    useChatSession();
+  const {
+    sessionTokensUsed,
+    tokenBudget,
+    setTokenBudget,
+    costPerThousandTokens,
+  } = useChatSession();
   const [open, setOpen] = React.useState(false);
-  const [tokenBudget, setTokenBudget] = React.useState(initialTokenBudget);
   const tokensUsed = sessionTokensUsed;
 
   const {
@@ -97,7 +101,7 @@ export default function TokenBudgetFooter() {
     formState: { errors, isSubmitting },
   } = useForm<TokenBudgetValues>({
     resolver: zodResolver(tokenBudgetSchema),
-    defaultValues: { tokenBudget: initialTokenBudget },
+    defaultValues: { tokenBudget },
     mode: "onSubmit",
   });
 
@@ -107,9 +111,34 @@ export default function TokenBudgetFooter() {
     }
   }, [open, reset, tokenBudget]);
 
-  const onSubmit = (values: TokenBudgetValues) => {
-    setTokenBudget(values.tokenBudget);
-    setOpen(false);
+  const onSubmit = async (values: TokenBudgetValues) => {
+    try {
+      const res = await fetch("/api/organization", {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tokenBudget: values.tokenBudget }),
+      });
+      const payload = (await res.json()) as
+        | { tokenBudget: number }
+        | { error: string };
+
+      if (!res.ok) {
+        throw new Error(
+          "error" in payload ? payload.error : "Failed to save token budget",
+        );
+      }
+      if (!("tokenBudget" in payload)) {
+        throw new Error("Invalid response from server");
+      }
+
+      setTokenBudget(payload.tokenBudget);
+      setOpen(false);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to save token budget",
+      );
+    }
   };
 
   const cost = (tokensUsed / 1000) * costPerThousandTokens;
@@ -150,7 +179,8 @@ export default function TokenBudgetFooter() {
                   <DialogHeader>
                     <DialogTitle>Edit Token Budget</DialogTitle>
                     <DialogDescription>
-                      Update your monthly/max token budget.
+                      Update your organization&apos;s token budget. This value
+                      is shared across the org.
                     </DialogDescription>
                   </DialogHeader>
 
@@ -189,7 +219,7 @@ export default function TokenBudgetFooter() {
                         Cancel
                       </Button>
                       <Button type="submit" disabled={isSubmitting}>
-                        Save
+                        {isSubmitting ? "Saving…" : "Save"}
                       </Button>
                     </DialogFooter>
                   </form>
@@ -203,4 +233,3 @@ export default function TokenBudgetFooter() {
     </Card>
   );
 }
-

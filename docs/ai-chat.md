@@ -37,6 +37,8 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | Usage estimate fallback | `apps/web/src/lib/chat/estimate-usage.ts` |
 | Session token context | `apps/web/src/app/dashboard/chat-session-context.tsx` |
 | Token budget footer | `apps/web/src/app/dashboard/token-budget-footer.tsx` |
+| Org settings API (token budget) | `apps/web/src/app/api/organization/route.ts` |
+| Org token budget schema | `supabase/migrations/20260725125628_org_token_budget.sql` |
 | Server Postgres client | `apps/web/src/lib/db/postgres.ts` |
 | Rate limiting | `apps/web/src/lib/rate-limit.ts` |
 | HNSW index on embeddings | `supabase/migrations/20260720003050_match_document_chunks_rpc.sql` (index retained; any early RPC dropped later) |
@@ -304,7 +306,7 @@ flowchart TB
 - Each assistant reply shows its `usage.totalTokens` once the `usage` event arrives.
 - `ChatSessionProvider` holds `sessionTokensUsed` seeded from `GET /api/conversations` → `orgTokensUsed` (sum of assistant `total_tokens` across the org).
 - Streaming adjusts that total immediately; history refetch reconciles from the database.
-- `TokenBudgetFooter` reads that sum. Budget editing and cost (`tokensUsed / 1000 * costPerThousandTokens`) stay local to the footer; defaults are `initialTokenBudget = 1000` and `costPerThousandTokens = 0.01`.
+- `TokenBudgetFooter` reads that sum. The org token budget is stored on `organizations.token_budget`, loaded on dashboard start into `ChatSessionProvider`, and saved via `PATCH /api/organization`. Cost uses `tokensUsed / 1000 * costPerThousandTokens` (default `0.01`). Default budget is `1000`.
 
 `EventSource` is not used because the request is a **POST** with a JSON body.
 

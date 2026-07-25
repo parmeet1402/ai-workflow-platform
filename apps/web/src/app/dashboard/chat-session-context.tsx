@@ -18,7 +18,9 @@ export type ChatSessionContextValue = {
   setSessionTokensUsed: (tokens: number) => void;
   /** Add (or subtract) tokens after a stream completes / regenerate. */
   adjustSessionTokensUsed: (delta: number) => void;
-  initialTokenBudget: number;
+  /** Org-level token budget (loaded on dashboard start; persisted via API). */
+  tokenBudget: number;
+  setTokenBudget: (budget: number) => void;
   costPerThousandTokens: number;
 };
 
@@ -26,7 +28,7 @@ const ChatSessionContext = createContext<ChatSessionContextValue | undefined>(
   undefined,
 );
 
-const DEFAULT_TOKEN_BUDGET = 1000;
+export const DEFAULT_TOKEN_BUDGET = 1000;
 const DEFAULT_COST_PER_THOUSAND = 0.01;
 
 export function ChatSessionProvider({
@@ -39,6 +41,7 @@ export function ChatSessionProvider({
   costPerThousandTokens?: number;
 }) {
   const [sessionTokensUsed, setSessionTokensUsedState] = useState(0);
+  const [tokenBudget, setTokenBudgetState] = useState(initialTokenBudget);
 
   const setSessionTokensUsed = useCallback((tokens: number) => {
     setSessionTokensUsedState(Math.max(0, Math.floor(tokens)));
@@ -50,19 +53,25 @@ export function ChatSessionProvider({
     );
   }, []);
 
+  const setTokenBudget = useCallback((budget: number) => {
+    setTokenBudgetState(Math.max(1, Math.floor(budget)));
+  }, []);
+
   const value = useMemo<ChatSessionContextValue>(
     () => ({
       sessionTokensUsed,
       setSessionTokensUsed,
       adjustSessionTokensUsed,
-      initialTokenBudget,
+      tokenBudget,
+      setTokenBudget,
       costPerThousandTokens,
     }),
     [
       sessionTokensUsed,
       setSessionTokensUsed,
       adjustSessionTokensUsed,
-      initialTokenBudget,
+      tokenBudget,
+      setTokenBudget,
       costPerThousandTokens,
     ],
   );
