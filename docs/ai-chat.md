@@ -262,7 +262,8 @@ flowchart TB
 4. If the response is not `text/event-stream`, treat the body as JSON error.
 5. Otherwise `readChatSse` buffers network chunks, splits on `\n\n`, and dispatches typed events:
    - `delta` → append text to the assistant bubble
-   - `citations` / `usage` → patch that message (ready for Sources / token UI)
+   - `citations` → patch that message and render a compact **Sources** list (document name + optional page) linking to `/api/documents/:id/open` in a new tab; omitted when the array is empty
+   - `usage` → patch that message (token UI in a later checkpoint)
    - `error` → fail the turn (remove empty assistant, toast)
    - `done` → success
 6. On abort (unmount or superseded request), ignore follow-up errors; release the reader.
@@ -287,13 +288,14 @@ flowchart TB
 Shipped relative to the Phase 1 plan:
 
 - Org-scoped RAG ask + **streaming** SSE (backend + incremental UI).
-- Citations and usage are **emitted on the wire** and stored on the in-memory assistant message; richer Sources UI, token-budget footer wiring, regenerate, and durable conversations are follow-ups.
+- **Sources** under each assistant reply: deduped citations (`documentId` + page) link to `/api/documents/:id/open`. Hidden when retrieval returned no chunks.
+- Usage is **emitted on the wire** and stored on the in-memory assistant message; token-budget footer wiring, regenerate, and durable conversations are follow-ups.
 
 | Checkpoint | Status |
 |------------|--------|
 | CP1 Non-streaming RAG → evolved into streaming route | Done (superseded by CP2 shape) |
 | CP2 Streaming API + client reader | Done |
-| CP3 Sources UI (links to `/api/documents/:id/open`) | Pending |
+| CP3 Sources UI (links to `/api/documents/:id/open`) | Done |
 | CP4 Token usage in footer / per-message display | Pending |
 | CP5 Regenerate last turn | Pending |
 | CP6 Persist conversations / messages | Optional / pending |

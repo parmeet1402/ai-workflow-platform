@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { MessageSquare, SendIcon } from "lucide-react";
+import { FileText, MessageSquare, SendIcon } from "lucide-react";
 import { readChatSse } from "@/lib/chat/read-sse";
 import type { ChatCitation, ChatUsage } from "@/lib/chat/types";
 
@@ -31,6 +31,39 @@ function toApiMessages(messages: ChatMessage[]) {
   return messages
     .filter((m) => m.id !== INITIAL_ASSISTANT_ID)
     .map(({ role, content }) => ({ role, content }));
+}
+
+function citationLabel(citation: ChatCitation) {
+  if (citation.page == null) return citation.documentName;
+  return `${citation.documentName} · p. ${citation.page}`;
+}
+
+function MessageSources({ citations }: { citations: ChatCitation[] }) {
+  if (citations.length === 0) return null;
+
+  return (
+    <div className="mt-2 border-t border-border/60 pt-2">
+      <div className="mb-1.5 text-xs font-medium text-muted-foreground">
+        Sources
+      </div>
+      <ul className="flex flex-wrap gap-1.5">
+        {citations.map((citation) => (
+          <li key={`${citation.documentId}:${citation.page ?? ""}`}>
+            <a
+              href={`/api/documents/${citation.documentId}/open`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex max-w-full items-center gap-1 rounded-md border bg-muted/40 px-2 py-0.5 text-xs text-foreground transition-colors hover:bg-muted"
+              title={citationLabel(citation)}
+            >
+              <FileText className="size-3 shrink-0 text-muted-foreground" />
+              <span className="truncate">{citationLabel(citation)}</span>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 export default function DashboardChat() {
@@ -240,6 +273,9 @@ export default function DashboardChat() {
                       {m.role === "user" ? "You" : "Assistant"}
                     </div>
                     <div className="whitespace-pre-wrap">{m.content}</div>
+                    {m.role === "assistant" && m.citations ? (
+                      <MessageSources citations={m.citations} />
+                    ) : null}
                   </div>
                 );
               })}
