@@ -1,5 +1,3 @@
-import { NextResponse } from "next/server";
-
 import {
   buildRagMessages,
   chunksToCitations,
@@ -9,7 +7,8 @@ import {
   getChatModel,
 } from "@/lib/chat/openai";
 import { retrieveRelevantChunks } from "@/lib/chat/retrieval";
-import type { ChatUsage } from "@/lib/chat/types";
+import { formatSseEvent, SSE_HEADERS } from "@/lib/chat/sse";
+import type { ChatSseEvent, ChatUsage } from "@/lib/chat/types";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { createClient } from "@/lib/supabase/server";
 
@@ -24,7 +23,7 @@ type IncomingMessage = {
 };
 
 function jsonError(error: string, status: number, headers?: HeadersInit) {
-  return NextResponse.json({ error }, { status, headers });
+  return Response.json({ error }, { status, headers });
 }
 
 function validateAndParseAllMessages(body: unknown): { messages: Array<{ role: "user" | "assistant"; content: string }> } | { error: string } {
@@ -42,7 +41,6 @@ function validateAndParseAllMessages(body: unknown): { messages: Array<{ role: "
 
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [];
   for (const item of messagesRaw as IncomingMessage[]) {
-    // Loop through each raw message and validate it and output the message in desired format.
     if (item == null || typeof item !== "object") {
       return { error: "Each message must be an object" };
     }
@@ -79,9 +77,13 @@ function getLastUserQuestion(
   return null;
 }
 
+function sseResponse(stream: ReadableStream<Uint8Array>) {
+  return new Response(stream, { headers: SSE_HEADERS });
+}
+
 /**
- * Non-streaming RAG chat (CP1): auth + org + rate-limit → retrieve → completion.
- * Returns `{ answer, citations, usage }`.
+ * Streaming RAG chat (CP2): auth + org + rate-limit → retrieve → SSE deltas.
+ * Events: delta, citations, usage, done | error.
  */
 export async function POST(request: Request) {
   // This route is used to chat with the model.
@@ -93,7 +95,7 @@ export async function POST(request: Request) {
   // 5. Generate the chat response using the model.
   // 6. Return the chat response.
 
-  try {  
+  try {
     const supabase = await createClient();
 
     // Get the user from the database.
@@ -113,7 +115,7 @@ export async function POST(request: Request) {
       CHAT_RATE_LIMIT,
       CHAT_RATE_WINDOW_MS,
     );
-    
+
     // Validate the rate limit.
     if (!rateLimit.allowed) {
       return jsonError("Too many chat requests. Please slow down.", 429, {
@@ -166,50 +168,110 @@ export async function POST(request: Request) {
       query: question,
       client: openai,
     });
+    const citations = chunksToCitations(chunks);
 
-    // Generate the chat response using the model to be sent to the user.
-    const completion = await openai.chat.completions.create({
-      model: getChatModel(),
-      // Returns the system message and the user message.
-      // The system message is the system prompt plus the retrieved context (chunks)
-      // The user message is the user's question.
-      messages: buildRagMessages({ question, chunks }),
-      stream: false,
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      // controller is used to enqueue the stream of data from the server.
+      async start(controller) {
+        // enqueue is used to enqueue the stream of data from the server.
+        const enqueue = (event: ChatSseEvent) => {
+          // encoder.encode is used to encode the stream of data from the server (in string) to bytes.
+          // formatSseEvent is used to format the stream of data from the server (in string) to SSE event.
+          controller.enqueue(encoder.encode(formatSseEvent(event)));
+        };
+
+        try {
+          const completion = await openai.chat.completions.create(
+            {
+              model: getChatModel(),
+              messages: buildRagMessages({ question, chunks }),
+              stream: true,
+              stream_options: { include_usage: true },
+            },
+            { signal: request.signal },
+          );
+
+          // sawDelta is used to check if the stream of data from the server has a delta.
+          let sawDelta = false;
+          // usage is used to store the usage of the stream of data from the server.
+          let usage: ChatUsage = {
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 0,
+          };
+
+          for await (const chunk of completion) {
+            if (request.signal.aborted) {
+              break;
+            }
+
+            const text = chunk.choices[0]?.delta?.content;
+            if (text) {
+              sawDelta = true;
+              enqueue({ type: "delta", text });
+            }
+
+            const usageRaw = chunk.usage;
+            if (usageRaw) {
+              usage = {
+                promptTokens: usageRaw.prompt_tokens ?? 0,
+                completionTokens: usageRaw.completion_tokens ?? 0,
+                totalTokens: usageRaw.total_tokens ?? 0,
+              };
+            }
+          }
+
+          if (request.signal.aborted) {
+            controller.close();
+            return;
+          }
+
+          if (!sawDelta) {
+            enqueue({ type: "error", error: "Empty completion from model" });
+            controller.close();
+            return;
+          }
+
+          enqueue({ type: "citations", citations });
+          enqueue({ type: "usage", usage });
+          enqueue({ type: "done" });
+          controller.close();
+        } catch (error) {
+          console.error("Error streaming POST /api/chat", error);
+          const message =
+            error instanceof Error
+              ? error.message
+              : "Error generating chat response";
+          try {
+            if (
+              message.includes("OPENAI_API_KEY") ||
+              message.includes("DATABASE_URL")
+            ) {
+              enqueue({ type: "error", error: "Chat is not configured" });
+            } else {
+              enqueue({ type: "error", error: "Error generating chat response" });
+            }
+          } catch {
+            // Controller may already be closed.
+          }
+          try {
+            controller.close();
+          } catch {
+            // ignore
+          }
+        }
+      },
+      cancel() {
+        // Client disconnected; OpenAI async iterator stops on next chunk check.
+      },
     });
 
-    const answer = completion.choices[0]?.message?.content?.trim() ?? "";
-    // Check if the answer is empty.
-    if (!answer) {
-      return jsonError("Empty completion from model", 502);
-    }
-
-    // Get the usage data from the completion.
-    const usageRaw = completion.usage;
-    // Convert the usage data to the ChatUsage type.
-    const usage: ChatUsage = {
-      promptTokens: usageRaw?.prompt_tokens ?? 0,
-      completionTokens: usageRaw?.completion_tokens ?? 0,
-      totalTokens: usageRaw?.total_tokens ?? 0,
-    };
-
-    // Return the chat response to the user.
-    return NextResponse.json(
-      {
-        answer,
-        citations: chunksToCitations(chunks),
-        usage,
-      },
-      {
-        headers: {
-          "Cache-Control": "private, no-store, max-age=0",
-        },
-      },
-    );
+    return sseResponse(stream);
   } catch (error) {
     console.error("Error in POST /api/chat", error);
     const message =
       error instanceof Error ? error.message : "Error generating chat response";
-    // Config / missing env should surface as 500 with a stable client message.
     if (
       message.includes("OPENAI_API_KEY") ||
       message.includes("DATABASE_URL")

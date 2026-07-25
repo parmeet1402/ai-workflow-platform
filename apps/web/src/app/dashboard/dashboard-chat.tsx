@@ -1,12 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { useMutation } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { MessageSquare, SendIcon } from "lucide-react";
+import { readChatSse } from "@/lib/chat/read-sse";
 import type { ChatCitation, ChatUsage } from "@/lib/chat/types";
 
 const INITIAL_ASSISTANT_ID = "assistant-initial";
@@ -15,12 +15,8 @@ type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
-};
-
-type ChatApiSuccess = {
-  answer: string;
-  citations: ChatCitation[];
-  usage: ChatUsage;
+  citations?: ChatCitation[];
+  usage?: ChatUsage;
 };
 
 type ChatApiError = {
@@ -46,45 +42,15 @@ export default function DashboardChat() {
     },
   ]);
   const [input, setInput] = React.useState("");
+  const [isStreaming, setIsStreaming] = React.useState(false);
+  const [awaitingFirstToken, setAwaitingFirstToken] = React.useState(false);
+  const abortRef = React.useRef<AbortController | null>(null);
 
-  const chatMutation = useMutation({
-    mutationFn: async (apiMessages: Array<{ role: "user" | "assistant"; content: string }>) => {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: apiMessages }),
-      });
-
-      const data = (await res.json()) as ChatApiSuccess | ChatApiError;
-      if (!res.ok || "error" in data) {
-        throw new Error(
-          "error" in data && data.error
-            ? data.error
-            : "Chat request failed",
-        );
-      }
-      return data;
-    },
-    onSuccess: (data) => {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: newMessageId("assistant"),
-          role: "assistant",
-          content: data.answer,
-        },
-      ]);
-    },
-    onError: (error) => {
-      toast.error("Chat failed", {
-        description:
-          error instanceof Error ? error.message : "Could not get a response",
-      });
-    },
-  });
-
-  const isThinking = chatMutation.isPending;
+  React.useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
 
   // Session-only history: one entry for the current in-memory conversation.
   const sessionHistory = React.useMemo(() => {
@@ -102,21 +68,143 @@ export default function DashboardChat() {
     ];
   }, [messages]);
 
+  // Frontend function to stream the chat response from the model.
+  const streamChat = React.useCallback(
+    async (apiMessages: Array<{ role: "user" | "assistant"; content: string }>) => {
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      const assistantId = newMessageId("assistant");
+      setMessages((prev) => [
+        ...prev,
+        { id: assistantId, role: "assistant", content: "" },
+      ]);
+      setIsStreaming(true);
+      setAwaitingFirstToken(true);
+
+      // patchAssistant is used to patch the assistant's content.
+      const patchAssistant = (patch: Partial<ChatMessage>) => {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === assistantId ? { ...m, ...patch } : m)),
+        );
+      };
+
+      // appendDelta is used to append the delta to the assistant's content.
+      const appendDelta = (text: string) => {
+        setAwaitingFirstToken(false);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId ? { ...m, content: m.content + text } : m,
+          ),
+        );
+      };
+
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: apiMessages }),
+          signal: controller.signal,
+        });
+
+        const contentType = res.headers.get("content-type") ?? "";
+
+        // Auth / validation failures still return JSON.
+        if (!contentType.includes("text/event-stream")) {
+          const data = (await res.json()) as ChatApiError;
+          throw new Error(data.error || "Chat request failed");
+        }
+
+        if (!res.ok || !res.body) {
+          throw new Error("Chat request failed");
+        }
+
+        let streamError: string | null = null;
+
+        await readChatSse(
+          res.body,
+          (event) => {
+            switch (event.type) {
+              // update content
+              case "delta":
+                appendDelta(event.text);
+                break;
+              // update misc: citations and usage
+              case "citations":
+                patchAssistant({ citations: event.citations });
+                break;
+              case "usage":
+                patchAssistant({ usage: event.usage });
+                break;
+              case "error":
+                streamError = event.error;
+                break;
+              case "done":
+                break;
+            }
+          },
+          controller.signal,
+        );
+
+        if (controller.signal.aborted) return;
+
+        if (streamError) {
+          throw new Error(streamError);
+        }
+
+        setMessages((prev) => {
+          const assistant = prev.find((m) => m.id === assistantId);
+          if (assistant && !assistant.content.trim()) {
+            return prev.map((m) =>
+              m.id === assistantId
+                ? { ...m, content: "No response generated." }
+                : m,
+            );
+          }
+          return prev;
+        });
+      } catch (error) {
+        if (controller.signal.aborted) return;
+
+        setMessages((prev) => prev.filter((m) => m.id !== assistantId));
+        toast.error("Chat failed", {
+          description:
+            error instanceof Error ? error.message : "Could not get a response",
+        });
+      } finally {
+        if (abortRef.current === controller) {
+          abortRef.current = null;
+        }
+        setIsStreaming(false);
+        setAwaitingFirstToken(false);
+      }
+    },
+    [],
+  );
+
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    // Handle empty input or streaming.
     const trimmed = input.trim();
-    if (!trimmed || isThinking) return;
+    if (!trimmed || isStreaming) return;
 
+    // Create latest user message object.
     const userMessage: ChatMessage = {
       id: newMessageId("user"),
       role: "user",
       content: trimmed,
     };
+    // append the user message to the messages array.
     const nextMessages = [...messages, userMessage];
 
+    // update input and messages state [BOTH update UI]
     setInput("");
     setMessages(nextMessages);
-    chatMutation.mutate(toApiMessages(nextMessages));
+    // stream the chat response from the model and pass in new appended messages array.
+    // toApiMessages converts the messages array to the format expected by the API.
+    void streamChat(toApiMessages(nextMessages));
   };
 
   return (
@@ -129,24 +217,36 @@ export default function DashboardChat() {
         <CardContent className="min-h-0 flex flex-1 flex-col overflow-hidden">
           <div className="h-full min-h-0 flex-1 overflow-y-auto pr-2">
             <div className="space-y-3">
-              {messages.map((m) => (
-                <div
-                  key={m.id}
-                  className={[
-                    "rounded-lg border px-3 py-2 text-sm",
-                    m.role === "user"
-                      ? "bg-primary/5 border-primary/20"
-                      : "bg-background",
-                  ].join(" ")}
-                >
-                  <div className="mb-1 text-xs font-medium text-muted-foreground">
-                    {m.role === "user" ? "You" : "Assistant"}
+              {messages.map((m) => {
+                const isEmptyStreamingAssistant =
+                  m.role === "assistant" &&
+                  !m.content &&
+                  isStreaming &&
+                  awaitingFirstToken;
+
+                if (isEmptyStreamingAssistant) return null;
+
+                return (
+                  <div
+                    key={m.id}
+                    className={[
+                      "rounded-lg border px-3 py-2 text-sm",
+                      m.role === "user"
+                        ? "bg-primary/5 border-primary/20"
+                        : "bg-background",
+                    ].join(" ")}
+                  >
+                    <div className="mb-1 text-xs font-medium text-muted-foreground">
+                      {m.role === "user" ? "You" : "Assistant"}
+                    </div>
+                    <div className="whitespace-pre-wrap">{m.content}</div>
                   </div>
-                  <div className="whitespace-pre-wrap">{m.content}</div>
+                );
+              })}
+              {awaitingFirstToken ? (
+                <div className="text-sm text-muted-foreground">
+                  Assistant is thinking…
                 </div>
-              ))}
-              {isThinking ? (
-                <div className="text-sm text-muted-foreground">Assistant is thinking…</div>
               ) : null}
             </div>
           </div>
@@ -159,9 +259,9 @@ export default function DashboardChat() {
               onChange={(e) => setInput(e.target.value)}
               placeholder="Type your message here..."
               className="min-h-[2.2rem] max-h-32 resize-none"
-              disabled={isThinking}
+              disabled={isStreaming}
             />
-            <Button type="submit" disabled={isThinking || !input.trim()}>
+            <Button type="submit" disabled={isStreaming || !input.trim()}>
               <SendIcon className="size-4" />
             </Button>
           </form>

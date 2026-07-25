@@ -1,6 +1,6 @@
 # Document management
 
-An authenticated user is able to **list**, **upload**, **open**, and **delete** PDFs scoped to their organization. Next.js route handlers read the session cookie, resolve `organization_id` from `memberships`, and touch only that org’s rows and Storage objects. File bytes live in the Supabase Storage bucket **`documents`**; metadata lives in **`documents`** in Postgres.
+An authenticated user is able to **list**, **upload**, **open**, and **delete** PDFs scoped to their organization. Next.js route handlers read the session cookie, resolve `organization_id` from `memberships`, and touch only that org’s rows and Storage objects. File bytes live in the Supabase Storage bucket **`documents`**; metadata lives in **`documents`** in Postgres. After ingest, users can ask grounded questions via [AI Chat](ai-chat.md).
 
 Diagrams use [Mermaid](https://mermaid.js.org/).
 

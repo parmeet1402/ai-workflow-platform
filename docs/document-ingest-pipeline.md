@@ -469,3 +469,4 @@ WHERE table_schema = 'public'
 
 - [Document management](document-management.md)
 - [Authentication](authentication.md)
+- [AI Chat (streaming RAG)](ai-chat.md) — asks questions against `document_chunks` embeddings
