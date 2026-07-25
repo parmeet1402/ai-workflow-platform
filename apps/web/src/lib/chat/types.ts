@@ -22,16 +22,25 @@ export type ChatUsage = {
   totalTokens: number;
 };
 
-/** SSE event shapes used once streaming lands (CP2). */
+/** SSE event shapes for Approach B streaming chat. */
 export type ChatSseDeltaEvent = { type: "delta"; text: string };
 export type ChatSseCitationsEvent = { type: "citations"; citations: ChatCitation[] };
 export type ChatSseUsageEvent = { type: "usage"; usage: ChatUsage };
-export type ChatSseDoneEvent = { type: "done" };
+export type ChatSseConversationEvent = {
+  type: "conversation";
+  conversationId: string;
+  title: string;
+};
+export type ChatSseDoneEvent = {
+  type: "done";
+  conversationId?: string;
+};
 export type ChatSseErrorEvent = { type: "error"; error: string };
 
 export type ChatSseEvent =
   | ChatSseDeltaEvent
   | ChatSseCitationsEvent
   | ChatSseUsageEvent
+  | ChatSseConversationEvent
   | ChatSseDoneEvent
   | ChatSseErrorEvent;

@@ -10,9 +10,14 @@ import {
 } from "react";
 
 export type ChatSessionContextValue = {
-  /** Sum of assistant `usage.totalTokens` for the current browser session. */
+  /**
+   * Durable org-wide sum of assistant `total_tokens` (loaded from the API,
+   * then adjusted as the current session streams).
+   */
   sessionTokensUsed: number;
   setSessionTokensUsed: (tokens: number) => void;
+  /** Add (or subtract) tokens after a stream completes / regenerate. */
+  adjustSessionTokensUsed: (delta: number) => void;
   initialTokenBudget: number;
   costPerThousandTokens: number;
 };
@@ -39,16 +44,24 @@ export function ChatSessionProvider({
     setSessionTokensUsedState(Math.max(0, Math.floor(tokens)));
   }, []);
 
+  const adjustSessionTokensUsed = useCallback((delta: number) => {
+    setSessionTokensUsedState((prev) =>
+      Math.max(0, Math.floor(prev + delta)),
+    );
+  }, []);
+
   const value = useMemo<ChatSessionContextValue>(
     () => ({
       sessionTokensUsed,
       setSessionTokensUsed,
+      adjustSessionTokensUsed,
       initialTokenBudget,
       costPerThousandTokens,
     }),
     [
       sessionTokensUsed,
       setSessionTokensUsed,
+      adjustSessionTokensUsed,
       initialTokenBudget,
       costPerThousandTokens,
     ],

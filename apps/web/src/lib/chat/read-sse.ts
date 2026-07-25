@@ -4,6 +4,7 @@ const EVENT_TYPES = new Set([
   "delta",
   "citations",
   "usage",
+  "conversation",
   "done",
   "error",
 ]);

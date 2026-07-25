@@ -10,6 +10,13 @@ import {
   createOpenAIClient,
   getChatModel,
 } from "@/lib/chat/openai";
+import {
+  createConversation,
+  deleteLastAssistantMessage,
+  getOwnedConversation,
+  persistChatTurn,
+  titleFromQuestion,
+} from "@/lib/chat/persist";
 import { retrieveRelevantChunks } from "@/lib/chat/retrieval";
 import { formatSseEvent, SSE_HEADERS } from "@/lib/chat/sse";
 import type { ChatSseEvent, ChatUsage } from "@/lib/chat/types";
@@ -20,22 +27,44 @@ const CHAT_RATE_LIMIT = 20;
 const CHAT_RATE_WINDOW_MS = 60_000;
 const MAX_MESSAGE_CONTENT_CHARS = 8_000;
 const MAX_MESSAGES = 40;
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type IncomingMessage = {
   role?: unknown;
   content?: unknown;
 };
 
+type ParsedChatBody = {
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+  conversationId: string | null;
+  regenerate: boolean;
+};
+
 function jsonError(error: string, status: number, headers?: HeadersInit) {
   return Response.json({ error }, { status, headers });
 }
 
-function validateAndParseAllMessages(body: unknown): { messages: Array<{ role: "user" | "assistant"; content: string }> } | { error: string } {
+function parseConversationId(raw: unknown): string | null | { error: string } {
+  if (raw == null || raw === "") return null;
+  if (typeof raw !== "string" || !UUID_RE.test(raw)) {
+    return { error: "conversationId must be a valid UUID" };
+  }
+  return raw;
+}
+
+function validateAndParseBody(body: unknown): ParsedChatBody | { error: string } {
   if (body == null || typeof body !== "object") {
     return { error: "Invalid JSON body" };
   }
 
-  const messagesRaw = (body as { messages?: unknown }).messages;
+  const record = body as {
+    messages?: unknown;
+    conversationId?: unknown;
+    regenerate?: unknown;
+  };
+
+  const messagesRaw = record.messages;
   if (!Array.isArray(messagesRaw) || messagesRaw.length === 0) {
     return { error: "messages must be a non-empty array" };
   }
@@ -68,7 +97,21 @@ function validateAndParseAllMessages(body: unknown): { messages: Array<{ role: "
     messages.push({ role, content: trimmedContent });
   }
 
-  return { messages };
+  const conversationId = parseConversationId(record.conversationId);
+  if (conversationId && typeof conversationId === "object" && "error" in conversationId) {
+    return conversationId;
+  }
+
+  const regenerate = record.regenerate === true;
+  if (regenerate && !conversationId) {
+    return { error: "regenerate requires conversationId" };
+  }
+
+  return {
+    messages,
+    conversationId: conversationId as string | null,
+    regenerate,
+  };
 }
 
 function getLastUserQuestion(
@@ -86,8 +129,8 @@ function sseResponse(stream: ReadableStream<Uint8Array>) {
 }
 
 /**
- * Streaming RAG chat (CP2): auth + org + rate-limit → retrieve → SSE deltas.
- * Events: delta, citations, usage, done | error.
+ * Streaming RAG chat: auth + org + rate-limit → retrieve → SSE → persist on success.
+ * Events: delta, citations, usage, conversation, done | error.
  */
 export async function POST(request: Request) {
   // This route is used to chat with the model.
@@ -151,21 +194,39 @@ export async function POST(request: Request) {
     }
 
     // Takes in raw messages array, validates and returns a structured message {role, content} or array
-    const parsedResponse = validateAndParseAllMessages(body);
-    if ("error" in parsedResponse) {
-      return jsonError(parsedResponse.error, 400);
+    const parsed = validateAndParseBody(body);
+    if ("error" in parsed) {
+      return jsonError(parsed.error, 400);
     }
 
-    const question = getLastUserQuestion(parsedResponse.messages);
+    const question = getLastUserQuestion(parsed.messages);
 
     // Check if the user has asked a question.
     if (!question) {
       return jsonError("messages must include at least one user message", 400);
     }
 
+    let existingTitle: string | null = null;
+    if (parsed.conversationId) {
+      try {
+        const existing = await getOwnedConversation(supabase, {
+          conversationId: parsed.conversationId,
+          organizationId,
+          userId: user.id,
+        });
+        if (!existing) {
+          return jsonError("Conversation not found", 404);
+        }
+        existingTitle = existing.title;
+      } catch (loadError) {
+        console.error("Error loading conversation", loadError);
+        return jsonError("Failed to load conversation", 500);
+      }
+    }
+
     const openai = createOpenAIClient();
-    
-    // 1. Question is converted into a vector embedding 
+
+    // 1. Question is converted into a vector embedding
     // 2. The vector embedding is used to retrieve relevant chunks from the database.
     const chunks = await retrieveRelevantChunks({
       organizationId,
@@ -176,6 +237,9 @@ export async function POST(request: Request) {
     const ragMessages = buildRagMessages({ question, chunks });
 
     const encoder = new TextEncoder();
+    const requestConversationId = parsed.conversationId;
+    const requestRegenerate = parsed.regenerate;
+
     const stream = new ReadableStream<Uint8Array>({
       // controller is used to enqueue the stream of data from the server.
       async start(controller) {
@@ -250,9 +314,54 @@ export async function POST(request: Request) {
             });
           }
 
+          let conversationId = requestConversationId;
+          let conversationTitle =
+            existingTitle ?? titleFromQuestion(question);
+          let skipUserMessage = false;
+
+          try {
+            if (!conversationId) {
+              const created = await createConversation(supabase, {
+                organizationId,
+                userId: user.id,
+                title: conversationTitle,
+              });
+              conversationId = created.id;
+              conversationTitle = created.title;
+            } else if (requestRegenerate) {
+              await deleteLastAssistantMessage(supabase, conversationId);
+              skipUserMessage = true;
+            }
+
+            await persistChatTurn(supabase, {
+              conversationId,
+              userContent: question,
+              assistantContent: completionText,
+              citations,
+              usage,
+              skipUserMessage,
+            });
+          } catch (persistError) {
+            console.error("Error persisting chat turn", persistError);
+            enqueue({
+              type: "error",
+              error: "Failed to save conversation",
+            });
+            controller.close();
+            return;
+          }
+
           enqueue({ type: "citations", citations });
           enqueue({ type: "usage", usage });
-          enqueue({ type: "done" });
+          enqueue({
+            type: "conversation",
+            conversationId,
+            title: conversationTitle,
+          });
+          enqueue({
+            type: "done",
+            conversationId,
+          });
           controller.close();
         } catch (error) {
           console.error("Error streaming POST /api/chat", error);

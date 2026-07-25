@@ -14,7 +14,7 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 2. Tokens appear **incrementally** in the dashboard (SSE `delta` events).
 3. Auth, membership, and rate limiting match other document APIs.
 4. Retrieval and chat policy live in the **Next.js** tier (parameterized SQL), not in a Postgres RPC.
-5. Message history is **session-only** in the browser for now (no conversation tables yet).
+5. Conversations and messages are **persisted** (org-scoped RLS); history survives refresh; the footer uses durable org-wide token totals.
 
 ---
 
@@ -24,6 +24,10 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 |--------|------|
 | Dashboard UI | `apps/web/src/app/dashboard/dashboard-chat.tsx` |
 | Chat API (SSE) | `apps/web/src/app/api/chat/route.ts` |
+| Conversations list / create | `apps/web/src/app/api/conversations/route.ts` |
+| Conversation detail | `apps/web/src/app/api/conversations/[conversationId]/route.ts` |
+| Persist helpers | `apps/web/src/lib/chat/persist.ts` |
+| Conversation DTOs | `apps/web/src/types/conversation.ts` |
 | OpenAI client / models | `apps/web/src/lib/chat/openai.ts` |
 | Vector retrieval (embed + KNN SQL) | `apps/web/src/lib/chat/retrieval.ts` |
 | System prompt + citations helpers | `apps/web/src/lib/chat/prompt.ts` |
@@ -36,6 +40,7 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | Server Postgres client | `apps/web/src/lib/db/postgres.ts` |
 | Rate limiting | `apps/web/src/lib/rate-limit.ts` |
 | HNSW index on embeddings | `supabase/migrations/20260720003050_match_document_chunks_rpc.sql` (index retained; any early RPC dropped later) |
+| Conversations / messages schema | `supabase/migrations/20260725180000_chat_conversations.sql` |
 
 ---
 
@@ -98,8 +103,9 @@ flowchart LR
 
 **Paths**
 
-- **Ask (primary):** the browser POSTs `{ messages }` with session cookies; the route resolves the user and `organization_id`, embeds the last user question, retrieves top-k chunks, then streams SSE events until `done` or `error`.
-- **Abort:** the client aborts `fetch` (unmount or a new send); the route observes `request.signal` and stops enqueueing further events.
+- **Ask (primary):** the browser POSTs `{ messages, conversationId? }` with session cookies; the route resolves the user and `organization_id`, embeds the last user question, retrieves top-k chunks, then streams SSE events until `done` or `error`. On success it persists the turn (auto-creating a conversation when `conversationId` is omitted).
+- **History:** `GET /api/conversations` lists the user’s chats + org token sum; `GET /api/conversations/:id` loads messages for the sidebar.
+- **Abort:** the client aborts `fetch` (unmount or a new send); the route observes `request.signal` and stops enqueueing further events (nothing is persisted until a successful completion).
 - **Preflight failures:** auth, validation, rate limit, and missing config return **JSON** `{ error }` (not SSE) with the appropriate status.
 
 ---
@@ -120,7 +126,7 @@ sequenceDiagram
   participant OAI as OpenAI
   participant PG as Postgres
 
-  UI->>API: POST { messages } (cookies)
+  UI->>API: POST { messages, conversationId? } (cookies)
   API->>API: getUser + membership + rate-limit
   API->>OAI: embeddings.create(question)
   OAI-->>API: query vector (1536)
@@ -131,8 +137,10 @@ sequenceDiagram
     OAI-->>API: delta.content
     API-->>UI: event: delta
   end
+  API->>PG: persist conversation + messages (on success)
   API-->>UI: event: citations
   API-->>UI: event: usage
+  API-->>UI: event: conversation
   API-->>UI: event: done
 ```
 
@@ -149,8 +157,9 @@ Same pattern as document APIs:
 1. `createClient()` → `auth.getUser()` → **401** if missing.
 2. `checkRateLimit(\`chat:${user.id}\`, 20 / 60s)` → **429** + `Retry-After` if exceeded.
 3. `memberships.select("organization_id")` → **400** if no org.
-4. Parse/validate body: non-empty `messages` (max 40), each `{ role: "user" | "assistant", content }` (max 8 000 chars, trimmed non-empty).
+4. Parse/validate body: non-empty `messages` (max 40), each `{ role: "user" | "assistant", content }` (max 8 000 chars, trimmed non-empty); optional `conversationId` (UUID); optional `regenerate: true` (requires `conversationId`).
 5. Last **user** message is the retrieval query; missing user turn → **400**.
+6. If `conversationId` is set, verify the conversation belongs to the user in their org → **404** / **500** otherwise.
 
 Misconfiguration (`OPENAI_API_KEY` / `DATABASE_URL`) before the stream starts returns JSON **500** `"Chat is not configured"`. Failures after the stream opens emit a terminal SSE `error` event instead.
 
@@ -184,11 +193,21 @@ After retrieval, the handler returns `Content-Type: text/event-stream` and a `Re
 1. Calls `chat.completions.create({ stream: true, stream_options: { include_usage: true } })` with `request.signal`.
 2. For each chunk with `delta.content`, enqueues `delta`.
 3. Captures `usage` from the final provider chunk when present (`stream_options.include_usage`). If the provider omits usage (or returns zeros), falls back to a chars/4 estimate over the RAG prompt texts + accumulated completion (`estimateChatUsage`).
-4. If the client aborted, closes without terminal events.
+4. If the client aborted, closes without terminal events (and **without** persisting).
 5. If no text arrived, enqueues `error` (`Empty completion from model`).
-6. Otherwise enqueues `citations` → `usage` → `done`, then closes.
+6. On success: create conversation if needed (or, when `regenerate`, delete the last assistant message), insert user + assistant rows (skip user on regenerate), then enqueue `citations` → `usage` → `conversation` → `done`.
 
-Server framing helper: `formatSseEvent` in `lib/chat/sse.ts`. Response headers disable buffering (`Cache-Control: private, no-store`, `X-Accel-Buffering: no`).
+Server framing helper: `formatSseEvent` in `lib/chat/sse.ts`. Response headers disable buffering (`Cache-Control: private, no-store`, `X-Accel-Buffering: no`). Persist helpers live in `lib/chat/persist.ts`.
+
+### Conversation APIs
+
+| Method | Path | Behavior |
+|--------|------|----------|
+| `GET` | `/api/conversations` | Current user’s conversations (newest `updated_at` first) + `orgTokensUsed` (sum of assistant `total_tokens` in the org). |
+| `POST` | `/api/conversations` | Optional empty conversation create (`{ title? }`). Chat also auto-creates on first successful turn. |
+| `GET` | `/api/conversations/:id` | Conversation + ordered messages (owner only within org). |
+
+Schema: `conversations` / `messages` with org-scoped RLS (`supabase/migrations/20260725180000_chat_conversations.sql`).
 
 ---
 
@@ -205,9 +224,10 @@ data: <json>
 | Event | When | Payload |
 |--------|------|---------|
 | `delta` | Each token batch from the model | `{ "type": "delta", "text": "…" }` |
-| `citations` | After a non-empty completion, before `done` | `{ "type": "citations", "citations": [{ documentId, documentName, page }] }` |
+| `citations` | After a non-empty completion + successful persist | `{ "type": "citations", "citations": [{ documentId, documentName, page }] }` |
 | `usage` | After citations | `{ "type": "usage", "usage": { promptTokens, completionTokens, totalTokens } }` |
-| `done` | Success terminal | `{ "type": "done" }` |
+| `conversation` | After persist, before `done` | `{ "type": "conversation", "conversationId": "…", "title": "…" }` |
+| `done` | Success terminal | `{ "type": "done", "conversationId": "…" }` |
 | `error` | Failure terminal (in-stream) | `{ "type": "error", "error": "…" }` |
 
 Non-2xx / non-stream failures stay JSON: `{ "error": "…" }`.
@@ -220,8 +240,8 @@ UI: `apps/web/src/app/dashboard/dashboard-chat.tsx`. Client parser: `readChatSse
 
 ### Session state
 
-- In-memory `messages` only (plus a placeholder welcome assistant message).
-- “Chat History” sidebar shows the **current session** summary (first user message as title), not persisted conversations.
+- Active conversation held in client state (`conversationId` + `messages`), seeded from a placeholder welcome assistant message for new chats.
+- “Chat History” sidebar loads from `GET /api/conversations`; selecting an item loads `GET /api/conversations/:id`. **New chat** clears the active conversation.
 - Concurrent sends are blocked while `isStreaming` is true; a new stream aborts any prior `AbortController`.
 
 ### Streaming client flow
@@ -261,28 +281,30 @@ flowchart TB
 
 1. On submit, append the user turn and call `streamChat(toApiMessages(...))` (strips the welcome message).
 2. Create an empty assistant message; show “Assistant is thinking…” until the first `delta`.
-3. `fetch("/api/chat", { credentials: "include", signal })`.
+3. `fetch("/api/chat", { credentials: "include", signal, body: { messages, conversationId, regenerate? } })`.
 4. If the response is not `text/event-stream`, treat the body as JSON error.
 5. Otherwise `readChatSse` buffers network chunks, splits on `\n\n`, and dispatches typed events:
    - `delta` → append text to the assistant bubble
    - `citations` → patch that message and render a compact **Sources** list (document name + optional page) linking to `/api/documents/:id/open` in a new tab; omitted when the array is empty
-   - `usage` → patch that message; show per-reply token count; recompute session sum into `ChatSessionProvider` for the budget footer
+   - `usage` → patch that message; show per-reply token count; adjust durable org total in `ChatSessionProvider`
+   - `conversation` / `done` → store `conversationId`; invalidate the history query
    - `error` → fail the turn (remove empty assistant, toast)
-   - `done` → success
 6. On abort (unmount or superseded request), ignore follow-up errors; release the reader.
 
 ### Regenerate
 
 - A **Regenerate** control appears on the **last** assistant message only (not the welcome placeholder).
-- Clicking it drops that assistant turn and re-POSTs the prior messages through the same `streamChat` path (fresh retrieval + completion).
+- Clicking it drops that assistant turn and re-POSTs the prior messages with `regenerate: true` (requires a persisted `conversationId`).
+- On success the API deletes the previous assistant row, then inserts the replacement (usage + citations updated).
 - Disabled while `isStreaming` is true (same concurrency guard as send).
-- Session token total stays correct because the footer sum is derived from message `usage` values: removing the old reply subtracts its tokens; the new `usage` event adds the replacement.
+- Footer tokens adjust by `newTotal − oldTotal`, then reconcile from `orgTokensUsed` on history refetch.
 
-### Token usage (session)
+### Token usage (durable org total)
 
 - Each assistant reply shows its `usage.totalTokens` once the `usage` event arrives.
-- `ChatSessionProvider` wraps the dashboard; `sessionTokensUsed` is the sum of message totals for the current browser session.
-- `TokenBudgetFooter` reads that sum (client-state driven). Budget editing and cost (`tokensUsed / 1000 * costPerThousandTokens`) stay local to the footer; defaults are `initialTokenBudget = 1000` and `costPerThousandTokens = 0.01`.
+- `ChatSessionProvider` holds `sessionTokensUsed` seeded from `GET /api/conversations` → `orgTokensUsed` (sum of assistant `total_tokens` across the org).
+- Streaming adjusts that total immediately; history refetch reconciles from the database.
+- `TokenBudgetFooter` reads that sum. Budget editing and cost (`tokensUsed / 1000 * costPerThousandTokens`) stay local to the footer; defaults are `initialTokenBudget = 1000` and `costPerThousandTokens = 0.01`.
 
 `EventSource` is not used because the request is a **POST** with a JSON body.
 
@@ -295,7 +317,8 @@ flowchart TB
 | Approach B (manual SSE + `openai`) | Reuses the same SDK as the document worker; no Vercel AI SDK dependency; full control of event order (`delta` → `citations` → `usage` → `done`). |
 | Retrieval in Next.js | Keeps chat policy next to the route; migrations stay schema-only (HNSW index). |
 | Single-turn RAG prompt today | System + last user question + retrieved context. Full multi-turn history is accepted on the wire for future use; the completion prompt currently grounds on the latest question. |
-| Session-only UI history | Delivers streaming Q&A without conversation tables; persistence is a later checkpoint. |
+| Persist on successful `done` only | Avoids empty conversations / lost regenerates when the stream aborts or errors mid-flight. |
+| Org-scoped RLS + owner-filtered list | RLS mirrors documents (org membership); list/detail APIs further scope to the current `user_id`. |
 
 ---
 
@@ -305,8 +328,9 @@ Shipped relative to the Phase 1 plan:
 
 - Org-scoped RAG ask + **streaming** SSE (backend + incremental UI).
 - **Sources** under each assistant reply: deduped citations (`documentId` + page) link to `/api/documents/:id/open`. Hidden when retrieval returned no chunks.
-- **Token usage** per assistant reply + session aggregate in the budget footer (provider usage with estimate fallback).
-- **Regenerate** on the last assistant turn (re-streams; session usage replaces the old reply’s tokens). Durable conversations remain a follow-up.
+- **Token usage** per assistant reply + durable org aggregate in the budget footer (provider usage with estimate fallback).
+- **Regenerate** on the last assistant turn (re-streams; DB + footer usage replace the old reply).
+- **Persisted conversations** with history sidebar, reload-after-refresh, and org-scoped RLS.
 
 | Checkpoint | Status |
 |------------|--------|
@@ -315,7 +339,7 @@ Shipped relative to the Phase 1 plan:
 | CP3 Sources UI (links to `/api/documents/:id/open`) | Done |
 | CP4 Token usage in footer / per-message display | Done |
 | CP5 Regenerate last turn | Done |
-| CP6 Persist conversations / messages | Optional / pending |
+| CP6 Persist conversations / messages | Done |
 
 ---
 
