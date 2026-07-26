@@ -1,21 +1,16 @@
 import LogoutButton from "@/components/logout-button";
 import ThemeToggleButton from "@/components/theme-toggle-button";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-    Tooltip,
-    TooltipContent,
-    TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
-import { SettingsIcon } from "lucide-react";
+import { ChatControlsProvider } from "./chat-controls-context";
 import {
     ChatSessionProvider,
     DEFAULT_TOKEN_BUDGET,
 } from "./chat-session-context";
 import DashboardChat from "./dashboard-chat";
 import DashboardDocuments from "./dashboard-documents";
+import DashboardSettings from "./dashboard-settings";
 import TokenBudgetFooter from "./token-budget-footer";
 
 async function loadOrgTokenBudget(
@@ -59,47 +54,36 @@ export default async function Dashboard() {
 
     return (
         <ChatSessionProvider initialTokenBudget={initialTokenBudget}>
-            <div className="flex h-screen flex-col gap-4 p-6">
-                <header className="flex items-center justify-between">
-                    <div className="text-lg font-semibold">AI Workflow Platform</div>
+            <ChatControlsProvider>
+                <div className="flex h-screen flex-col gap-4 p-6">
+                    <header className="flex items-center justify-between">
+                        <div className="text-lg font-semibold">
+                            AI Workflow Platform
+                        </div>
 
-                    <div className="flex items-center gap-3">
-                        <Badge variant="secondary">{user.email}</Badge>
-                        <ThemeToggleButton />
+                        <div className="flex items-center gap-3">
+                            <Badge variant="secondary">{user.email}</Badge>
+                            <ThemeToggleButton />
+                            <DashboardSettings />
+                            <LogoutButton />
+                        </div>
+                    </header>
 
-                        <Tooltip>
-                            <TooltipTrigger asChild>
-                                <Button
-                                    variant="ghost"
-                                    size="icon-sm"
-                                    aria-label="Settings"
-                                >
-                                    <SettingsIcon className="size-4" />
-                                </Button>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                                <p>Settings</p>
-                            </TooltipContent>
-                        </Tooltip>
+                    <main className="min-h-0 flex-1">
+                        <div className="grid h-full min-h-0 grid-cols-[4fr_6fr] items-stretch gap-4">
+                            <DashboardDocuments />
 
-                        <LogoutButton />
-                    </div>
-                </header>
+                            <aside className="min-h-0 flex h-full">
+                                <DashboardChat />
+                            </aside>
+                        </div>
+                    </main>
 
-                <main className="min-h-0 flex-1">
-                    <div className="grid h-full min-h-0 grid-cols-[4fr_6fr] items-stretch gap-4">
-                        <DashboardDocuments />
-
-                        <aside className="min-h-0 flex h-full">
-                            <DashboardChat />
-                        </aside>
-                    </div>
-                </main>
-
-                <footer className="mt-auto">
-                    <TokenBudgetFooter />
-                </footer>
-            </div>
+                    <footer className="mt-auto">
+                        <TokenBudgetFooter />
+                    </footer>
+                </div>
+            </ChatControlsProvider>
         </ChatSessionProvider>
     );
 }

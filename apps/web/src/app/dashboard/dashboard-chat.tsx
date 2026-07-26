@@ -6,16 +6,35 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { FileText, MessageSquare, Plus, RefreshCw, SendIcon } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
+  FileText,
+  Loader2,
+  MessageSquare,
+  Plus,
+  RefreshCw,
+  SendIcon,
+} from "lucide-react";
 import { readChatSse } from "@/lib/chat/read-sse";
 import type { ChatCitation, ChatUsage } from "@/lib/chat/types";
 import type {
   ConversationDetail,
   ConversationListItem,
 } from "@/types/conversation";
+import { useChatControls } from "./chat-controls-context";
+import {
+  JsonModeBadge,
+  JsonModeToggle,
+  ModelSelect,
+  SystemPromptControl,
+  TemplatesControl,
+  TypingIndicator,
+} from "./chat-controls-ui";
 import { useChatSession } from "./chat-session-context";
-
-const INITIAL_ASSISTANT_ID = "assistant-initial";
 
 type ChatMessage = {
   id: string;
@@ -23,12 +42,8 @@ type ChatMessage = {
   content: string;
   citations?: ChatCitation[];
   usage?: ChatUsage;
-};
-
-const WELCOME_MESSAGE: ChatMessage = {
-  id: INITIAL_ASSISTANT_ID,
-  role: "assistant",
-  content: "Upload documents on the left, then ask questions here.",
+  /** Set when this assistant reply was requested with JSON mode on (UI-only until API persists it). */
+  jsonMode?: boolean;
 };
 
 type ChatApiError = {
@@ -40,15 +55,13 @@ function newMessageId(prefix: string) {
 }
 
 function toApiMessages(messages: ChatMessage[]) {
-  return messages
-    .filter((m) => m.id !== INITIAL_ASSISTANT_ID)
-    .map(({ role, content }) => ({ role, content }));
+  return messages.map(({ role, content }) => ({ role, content }));
 }
 
 /** Last turn is a real assistant reply that can be regenerated from its preceding user message. */
 function getRegenerateTarget(messages: ChatMessage[]) {
   const last = messages[messages.length - 1];
-  if (!last || last.role !== "assistant" || last.id === INITIAL_ASSISTANT_ID) {
+  if (!last || last.role !== "assistant") {
     return null;
   }
 
@@ -100,8 +113,33 @@ function MessageSources({ citations }: { citations: ChatCitation[] }) {
   );
 }
 
+function ChatEmptyState() {
+  return (
+    <div className="flex h-full min-h-[12rem] flex-col items-center justify-center gap-2 px-4 text-center">
+      <div className="flex size-10 items-center justify-center rounded-full border bg-muted/40">
+        <MessageSquare className="size-4 text-muted-foreground" />
+      </div>
+      <div className="text-sm font-medium">Ask about your documents</div>
+      <p className="max-w-xs text-xs text-muted-foreground">
+        Upload files on the left, then type a question below to get started.
+      </p>
+    </div>
+  );
+}
+
+function ConversationLoadingState() {
+  return (
+    <div className="flex h-full min-h-[12rem] flex-col items-center justify-center gap-2 px-4 text-center">
+      <Loader2
+        className="size-5 animate-spin text-muted-foreground"
+        aria-hidden
+      />
+      <div className="text-sm text-muted-foreground">Loading conversation…</div>
+    </div>
+  );
+}
+
 function detailToMessages(detail: ConversationDetail): ChatMessage[] {
-  if (detail.messages.length === 0) return [WELCOME_MESSAGE];
   return detail.messages.map((m) => ({
     id: m.id,
     role: m.role,
@@ -114,12 +152,17 @@ function detailToMessages(detail: ConversationDetail): ChatMessage[] {
 export default function DashboardChat() {
   const queryClient = useQueryClient();
   const { setSessionTokensUsed, adjustSessionTokensUsed } = useChatSession();
+  const {
+    model,
+    systemPrompt,
+    jsonMode,
+    setActiveConversation,
+    prepareNewChat,
+  } = useChatControls();
   const [conversationId, setConversationId] = React.useState<string | null>(
     null,
   );
-  const [messages, setMessages] = React.useState<ChatMessage[]>([
-    WELCOME_MESSAGE,
-  ]);
+  const [messages, setMessages] = React.useState<ChatMessage[]>([]);
   const [input, setInput] = React.useState("");
   const [isStreaming, setIsStreaming] = React.useState(false);
   const [awaitingFirstToken, setAwaitingFirstToken] = React.useState(false);
@@ -128,10 +171,16 @@ export default function DashboardChat() {
   >(null);
   const abortRef = React.useRef<AbortController | null>(null);
   const conversationIdRef = React.useRef<string | null>(null);
+  const controlsRef = React.useRef({ model, systemPrompt, jsonMode });
 
   React.useEffect(() => {
     conversationIdRef.current = conversationId;
-  }, [conversationId]);
+    setActiveConversation(conversationId);
+  }, [conversationId, setActiveConversation]);
+
+  React.useEffect(() => {
+    controlsRef.current = { model, systemPrompt, jsonMode };
+  }, [model, systemPrompt, jsonMode]);
 
   React.useEffect(() => {
     return () => {
@@ -195,10 +244,16 @@ export default function DashboardChat() {
       const controller = new AbortController();
       abortRef.current = controller;
 
+      const controls = controlsRef.current;
       const assistantId = newMessageId("assistant");
       setMessages((prev) => [
         ...prev,
-        { id: assistantId, role: "assistant", content: "" },
+        {
+          id: assistantId,
+          role: "assistant",
+          content: "",
+          jsonMode: controls.jsonMode || undefined,
+        },
       ]);
       setIsStreaming(true);
       setAwaitingFirstToken(true);
@@ -231,6 +286,10 @@ export default function DashboardChat() {
             messages: apiMessages,
             conversationId: conversationIdRef.current,
             regenerate: options?.regenerate === true,
+            // UI is ready; backend may ignore these until API integration.
+            model: controls.model,
+            systemPrompt: controls.systemPrompt,
+            jsonMode: controls.jsonMode,
           }),
           signal: controller.signal,
         });
@@ -370,17 +429,23 @@ export default function DashboardChat() {
   const onNewChat = () => {
     if (isStreaming) return;
     abortRef.current?.abort();
+    prepareNewChat();
     setConversationId(null);
     conversationIdRef.current = null;
-    setMessages([WELCOME_MESSAGE]);
+    setMessages([]);
     setInput("");
   };
 
   const onSelectConversation = async (id: string) => {
-    if (isStreaming || id === conversationId) return;
+    if (isStreaming || id === conversationId || loadingConversationId) return;
+
+    const previousMessages = messages;
+    const previousInput = input;
 
     abortRef.current?.abort();
     setLoadingConversationId(id);
+    setMessages([]);
+    setInput("");
 
     try {
       const res = await fetch(`/api/conversations/${id}`, {
@@ -400,8 +465,9 @@ export default function DashboardChat() {
       setConversationId(payload.conversation.id);
       conversationIdRef.current = payload.conversation.id;
       setMessages(detailToMessages(payload.conversation));
-      setInput("");
     } catch (error) {
+      setMessages(previousMessages);
+      setInput(previousInput);
       toast.error("Could not open conversation", {
         description:
           error instanceof Error ? error.message : "Please try again",
@@ -411,20 +477,28 @@ export default function DashboardChat() {
     }
   };
 
-  const regenerateTarget = isStreaming ? null : getRegenerateTarget(messages);
+  const isLoadingConversation = loadingConversationId !== null;
+  const chatBusy = isStreaming || isLoadingConversation;
+  const regenerateTarget = chatBusy ? null : getRegenerateTarget(messages);
+  const canSend = !chatBusy && Boolean(input.trim());
+  const showEmptyState =
+    messages.length === 0 && !isStreaming && !isLoadingConversation;
 
   return (
     <div className="grid h-full min-h-0 flex-1 grid-cols-[7fr_3fr] gap-4">
       <Card className="flex min-h-0 flex-1 flex-col">
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle className="text-base">Chat</CardTitle>
+        <CardHeader className="flex flex-row items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1">
+            <CardTitle className="text-base">Chat</CardTitle>
+            <SystemPromptControl disabled={chatBusy} />
+          </div>
           <Button
             type="button"
             variant="ghost"
             size="sm"
             className="h-8 gap-1.5 text-xs"
             onClick={onNewChat}
-            disabled={isStreaming}
+            disabled={chatBusy}
           >
             <Plus className="size-3.5" />
             New chat
@@ -433,77 +507,150 @@ export default function DashboardChat() {
 
         <CardContent className="min-h-0 flex flex-1 flex-col overflow-hidden">
           <div className="h-full min-h-0 flex-1 overflow-y-auto pr-2">
-            <div className="space-y-3">
-              {messages.map((m) => {
-                const isEmptyStreamingAssistant =
-                  m.role === "assistant" &&
-                  !m.content &&
-                  isStreaming &&
-                  awaitingFirstToken;
+            {isLoadingConversation ? (
+              <ConversationLoadingState />
+            ) : showEmptyState ? (
+              <ChatEmptyState />
+            ) : (
+              <div className="space-y-3">
+                {messages.map((m) => {
+                  const isTypingBubble =
+                    m.role === "assistant" &&
+                    !m.content &&
+                    isStreaming &&
+                    awaitingFirstToken;
 
-                if (isEmptyStreamingAssistant) return null;
-
-                return (
-                  <div
-                    key={m.id}
-                    className={[
-                      "rounded-lg border px-3 py-2 text-sm",
-                      m.role === "user"
-                        ? "bg-primary/5 border-primary/20"
-                        : "bg-background",
-                    ].join(" ")}
-                  >
-                    <div className="mb-1 flex items-center justify-between gap-2">
-                      <div className="text-xs font-medium text-muted-foreground">
-                        {m.role === "user" ? "You" : "Assistant"}
+                  return (
+                    <div
+                      key={m.id}
+                      className={[
+                        "rounded-lg border px-3 py-2 text-sm",
+                        m.role === "user"
+                          ? "bg-primary/5 border-primary/20"
+                          : "bg-background",
+                      ].join(" ")}
+                    >
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <div className="text-xs font-medium text-muted-foreground">
+                            {m.role === "user" ? "You" : "Assistant"}
+                          </div>
+                          {m.role === "assistant" && m.jsonMode ? (
+                            <JsonModeBadge />
+                          ) : null}
+                        </div>
+                        {regenerateTarget?.assistantId === m.id ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 px-2 text-xs text-muted-foreground"
+                            onClick={onRegenerate}
+                            disabled={isStreaming}
+                          >
+                            <RefreshCw className="size-3" />
+                            Regenerate
+                          </Button>
+                        ) : null}
                       </div>
-                      {regenerateTarget?.assistantId === m.id ? (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 px-2 text-xs text-muted-foreground"
-                          onClick={onRegenerate}
-                          disabled={isStreaming}
-                        >
-                          <RefreshCw className="size-3" />
-                          Regenerate
-                        </Button>
+                      {isTypingBubble ? (
+                        <TypingIndicator />
+                      ) : (
+                        <div className="whitespace-pre-wrap">{m.content}</div>
+                      )}
+                      {m.role === "assistant" && m.usage ? (
+                        <div className="mt-1.5 text-xs text-muted-foreground">
+                          {formatMessageTokens(m.usage)}
+                        </div>
+                      ) : null}
+                      {m.role === "assistant" && m.citations ? (
+                        <MessageSources citations={m.citations} />
                       ) : null}
                     </div>
-                    <div className="whitespace-pre-wrap">{m.content}</div>
-                    {m.role === "assistant" && m.usage ? (
-                      <div className="mt-1.5 text-xs text-muted-foreground">
-                        {formatMessageTokens(m.usage)}
-                      </div>
-                    ) : null}
-                    {m.role === "assistant" && m.citations ? (
-                      <MessageSources citations={m.citations} />
-                    ) : null}
-                  </div>
-                );
-              })}
-              {awaitingFirstToken ? (
-                <div className="text-sm text-muted-foreground">
-                  Assistant is thinking…
-                </div>
-              ) : null}
-            </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </CardContent>
 
         <CardFooter>
-          <form onSubmit={onSubmit} className="flex w-full items-end gap-2">
-            <Textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Type your message here..."
-              className="min-h-[2.2rem] max-h-32 resize-none"
-              disabled={isStreaming}
-            />
-            <Button type="submit" disabled={isStreaming || !input.trim()}>
-              <SendIcon className="size-4" />
-            </Button>
+          <form onSubmit={onSubmit} className="w-full">
+            <div
+              className={[
+                "flex w-full flex-col rounded-xl border border-input bg-transparent shadow-xs transition-[color,box-shadow]",
+                "focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50",
+                "dark:bg-input/30",
+              ].join(" ")}
+            >
+              <Textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (
+                    e.key !== "Enter" ||
+                    e.shiftKey ||
+                    e.nativeEvent.isComposing
+                  ) {
+                    return;
+                  }
+                  e.preventDefault();
+                  if (canSend) {
+                    e.currentTarget.form?.requestSubmit();
+                  }
+                }}
+                placeholder="Ask a question…"
+                rows={1}
+                disabled={chatBusy}
+                className={[
+                  "max-h-[7.5rem] min-h-10 resize-none overflow-y-auto border-0 bg-transparent px-3 pt-3 pb-2 shadow-none",
+                  "field-sizing-content leading-5 md:text-sm",
+                  "focus-visible:border-transparent focus-visible:ring-0",
+                  "dark:bg-transparent",
+                  chatBusy ? "cursor-not-allowed opacity-70" : "",
+                ].join(" ")}
+              />
+              <div className="flex items-center justify-between gap-2 px-2 pb-2">
+                <div className="flex min-w-0 items-center gap-1">
+                  <ModelSelect disabled={chatBusy} />
+                  <TemplatesControl
+                    composerValue={input}
+                    onInsert={setInput}
+                    disabled={chatBusy}
+                  />
+                  <JsonModeToggle disabled={chatBusy} />
+                </div>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <Button
+                        type="submit"
+                        size="icon-sm"
+                        className="size-8 disabled:opacity-40"
+                        disabled={!canSend}
+                        aria-label="Send message"
+                      >
+                        <SendIcon className="size-4" />
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    <p>
+                      {canSend
+                        ? "Send · Enter"
+                        : isStreaming
+                          ? "Waiting for reply…"
+                          : isLoadingConversation
+                            ? "Loading conversation…"
+                            : "Type a message to send"}
+                    </p>
+                    <p className="text-muted-foreground">
+                      Shift+Enter for new line
+                    </p>
+                  </TooltipContent>
+                </Tooltip>
+              </div>
+            </div>
           </form>
         </CardFooter>
       </Card>
@@ -534,16 +681,15 @@ export default function DashboardChat() {
                   <button
                     key={item.id}
                     type="button"
-                    disabled={isStreaming || isLoading}
+                    disabled={chatBusy}
                     onClick={() => void onSelectConversation(item.id)}
                     className={[
-                      "w-full rounded-lg border px-3 py-2 text-left transition-colors",
+                      "w-full cursor-pointer rounded-lg border px-3 py-2 text-left transition-colors",
+                      "disabled:cursor-not-allowed",
                       isActive
                         ? "border-primary/40 bg-primary/5"
                         : "bg-background hover:bg-muted/50",
-                      isStreaming || isLoading
-                        ? "opacity-60"
-                        : "",
+                      chatBusy || isLoading ? "opacity-60" : "",
                     ].join(" ")}
                   >
                     <div className="truncate text-sm font-medium">
