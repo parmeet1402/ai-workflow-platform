@@ -22,7 +22,9 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { canAdjustSystemPrompt } from "@/lib/auth/roles";
 import { getBuiltInSystemPrompt } from "@/lib/chat/chat-controls-storage";
+import { useAuth } from "@/features/auth/useAuth";
 import { useChatControls, type SettingsTab } from "./chat-controls-context";
 
 function SystemPromptSettings() {
@@ -235,6 +237,8 @@ function TemplatesSettings() {
 }
 
 export default function DashboardSettings() {
+  const { role } = useAuth();
+  const canEditSystemPrompt = canAdjustSystemPrompt(role);
   const {
     settingsOpen,
     settingsTab,
@@ -242,6 +246,11 @@ export default function DashboardSettings() {
     setSettingsTab,
     openSettings,
   } = useChatControls();
+
+  const effectiveTab: SettingsTab =
+    !canEditSystemPrompt && settingsTab === "system"
+      ? "templates"
+      : settingsTab;
 
   return (
     <>
@@ -251,7 +260,9 @@ export default function DashboardSettings() {
             variant="ghost"
             size="icon-sm"
             aria-label="Settings"
-            onClick={() => openSettings("system")}
+            onClick={() =>
+              openSettings(canEditSystemPrompt ? "system" : "templates")
+            }
           >
             <SettingsIcon className="size-4" />
           </Button>
@@ -266,22 +277,27 @@ export default function DashboardSettings() {
           <DialogHeader>
             <DialogTitle>Settings</DialogTitle>
             <DialogDescription>
-              System prompt defaults and prompt templates. Chat model and JSON
-              mode stay in the chat column.
+              {canEditSystemPrompt
+                ? "System prompt defaults and prompt templates. Chat model and JSON mode stay in the chat column."
+                : "Prompt templates. Chat model and JSON mode stay in the chat column."}
             </DialogDescription>
           </DialogHeader>
 
           <Tabs
-            value={settingsTab}
+            value={effectiveTab}
             onValueChange={(value) => setSettingsTab(value as SettingsTab)}
           >
             <TabsList className="w-full">
-              <TabsTrigger value="system">System</TabsTrigger>
+              {canEditSystemPrompt ? (
+                <TabsTrigger value="system">System</TabsTrigger>
+              ) : null}
               <TabsTrigger value="templates">Templates</TabsTrigger>
             </TabsList>
-            <TabsContent value="system" className="mt-3">
-              <SystemPromptSettings />
-            </TabsContent>
+            {canEditSystemPrompt ? (
+              <TabsContent value="system" className="mt-3">
+                <SystemPromptSettings />
+              </TabsContent>
+            ) : null}
             <TabsContent value="templates" className="mt-3">
               <TemplatesSettings />
             </TabsContent>

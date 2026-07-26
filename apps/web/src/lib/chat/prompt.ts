@@ -31,9 +31,16 @@ export function formatRetrievedContext(chunks: RetrievedChunk[]): string {
 
 /**
  * Build the grounded system message (instructions + retrieved excerpts).
+ * When `systemPrompt` is provided (non-empty after trim), it replaces the
+ * built-in instruction block; document context is always appended.
  */
-export function buildRagSystemMessage(chunks: RetrievedChunk[]): string {
-  return `${RAG_SYSTEM_PROMPT}\n\nDocument context:\n${formatRetrievedContext(chunks)}`;
+export function buildRagSystemMessage(
+  chunks: RetrievedChunk[],
+  systemPrompt?: string | null,
+): string {
+  const trimmed = systemPrompt?.trim();
+  const instructions = trimmed || RAG_SYSTEM_PROMPT;
+  return `${instructions}\n\nDocument context:\n${formatRetrievedContext(chunks)}`;
 }
 
 /**
@@ -43,10 +50,15 @@ export function buildRagSystemMessage(chunks: RetrievedChunk[]): string {
 export function buildRagMessages(options: {
   question: string;
   chunks: RetrievedChunk[];
+  /** Owner-supplied instructions; empty/omitted uses {@link RAG_SYSTEM_PROMPT}. */
+  systemPrompt?: string | null;
 }): Array<{ role: "system" | "user"; content: string }> {
   const question = options.question.trim();
   return [
-    { role: "system", content: buildRagSystemMessage(options.chunks) },
+    {
+      role: "system",
+      content: buildRagSystemMessage(options.chunks, options.systemPrompt),
+    },
     { role: "user", content: question },
   ];
 }

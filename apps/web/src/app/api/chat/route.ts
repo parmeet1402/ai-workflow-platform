@@ -1,3 +1,4 @@
+import { canAdjustSystemPrompt } from "@/lib/auth/roles";
 import {
   buildRagMessages,
   chunksToCitations,
@@ -26,6 +27,7 @@ import { createClient } from "@/lib/supabase/server";
 const CHAT_RATE_LIMIT = 20;
 const CHAT_RATE_WINDOW_MS = 60_000;
 const MAX_MESSAGE_CONTENT_CHARS = 8_000;
+const MAX_SYSTEM_PROMPT_CHARS = 8_000;
 const MAX_MESSAGES = 40;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -39,6 +41,8 @@ type ParsedChatBody = {
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   conversationId: string | null;
   regenerate: boolean;
+  /** Trimmed custom instructions, or null to use the built-in RAG prompt. */
+  systemPrompt: string | null;
 };
 
 function jsonError(error: string, status: number, headers?: HeadersInit) {
@@ -62,6 +66,7 @@ function validateAndParseBody(body: unknown): ParsedChatBody | { error: string }
     messages?: unknown;
     conversationId?: unknown;
     regenerate?: unknown;
+    systemPrompt?: unknown;
   };
 
   const messagesRaw = record.messages;
@@ -107,10 +112,27 @@ function validateAndParseBody(body: unknown): ParsedChatBody | { error: string }
     return { error: "regenerate requires conversationId" };
   }
 
+  let systemPrompt: string | null = null;
+  if (record.systemPrompt != null) {
+    if (typeof record.systemPrompt !== "string") {
+      return { error: "systemPrompt must be a string" };
+    }
+    const trimmed = record.systemPrompt.trim();
+    if (trimmed.length > MAX_SYSTEM_PROMPT_CHARS) {
+      return {
+        error: `systemPrompt must be at most ${MAX_SYSTEM_PROMPT_CHARS} characters`,
+      };
+    }
+    if (trimmed) {
+      systemPrompt = trimmed;
+    }
+  }
+
   return {
     messages,
     conversationId: conversationId as string | null,
     regenerate,
+    systemPrompt,
   };
 }
 
@@ -173,7 +195,7 @@ export async function POST(request: Request) {
     // find the organization data for the user.
     const { data: membership, error: membershipError } = await supabase
       .from("memberships")
-      .select("organization_id")
+      .select("organization_id, role")
       .eq("user_id", user.id)
       .single();
 
@@ -184,6 +206,8 @@ export async function POST(request: Request) {
 
     // Get the organization ID from the organization/memberships table.
     const organizationId = membership.organization_id as string;
+    const membershipRole =
+      typeof membership.role === "string" ? membership.role : null;
 
     let body: unknown;
     try {
@@ -197,6 +221,16 @@ export async function POST(request: Request) {
     const parsed = validateAndParseBody(body);
     if ("error" in parsed) {
       return jsonError(parsed.error, 400);
+    }
+
+    if (
+      parsed.systemPrompt &&
+      !canAdjustSystemPrompt(membershipRole)
+    ) {
+      return jsonError(
+        "Only organization owners can set a custom system prompt",
+        403,
+      );
     }
 
     const question = getLastUserQuestion(parsed.messages);
@@ -234,7 +268,11 @@ export async function POST(request: Request) {
       client: openai,
     });
     const citations = chunksToCitations(chunks);
-    const ragMessages = buildRagMessages({ question, chunks });
+    const ragMessages = buildRagMessages({
+      question,
+      chunks,
+      systemPrompt: parsed.systemPrompt,
+    });
 
     const encoder = new TextEncoder();
     const requestConversationId = parsed.conversationId;

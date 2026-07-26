@@ -35,8 +35,10 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { canAdjustSystemPrompt } from "@/lib/auth/roles";
 import { cn } from "@/lib/utils";
 import { CHAT_MODELS, findChatModel, type ChatModelId } from "@/lib/chat/models";
+import { useAuth } from "@/features/auth/useAuth";
 import { useChatControls } from "./chat-controls-context";
 
 export function ModelSelect({ disabled }: { disabled?: boolean }) {
@@ -105,6 +107,7 @@ export function ModelSelect({ disabled }: { disabled?: boolean }) {
 }
 
 export function SystemPromptControl({ disabled }: { disabled?: boolean }) {
+  const { role } = useAuth();
   const {
     systemPrompt,
     isCustomSystemPrompt,
@@ -124,6 +127,10 @@ export function SystemPromptControl({ disabled }: { disabled?: boolean }) {
       setApplyAsDefault(false);
     }
   }, [open, systemPrompt]);
+
+  if (!canAdjustSystemPrompt(role)) {
+    return null;
+  }
 
   const onSave = () => {
     const next = draft.trim();
