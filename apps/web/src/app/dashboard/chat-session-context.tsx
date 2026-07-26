@@ -18,7 +18,7 @@ export type ChatSessionContextValue = {
   setSessionTokensUsed: (tokens: number) => void;
   /** Add (or subtract) tokens after a stream completes / regenerate. */
   adjustSessionTokensUsed: (delta: number) => void;
-  /** Org-level token budget (loaded on dashboard start; persisted via API). */
+  /** Org monthly token cap (loaded on dashboard start; persisted via API). */
   tokenBudget: number;
   setTokenBudget: (budget: number) => void;
   costPerThousandTokens: number;

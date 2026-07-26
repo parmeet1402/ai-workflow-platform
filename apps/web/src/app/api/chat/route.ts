@@ -16,11 +16,16 @@ import {
   deleteLastAssistantMessage,
   getOwnedConversation,
   persistChatTurn,
+  sumOrgTokensUsed,
   titleFromQuestion,
 } from "@/lib/chat/persist";
 import { retrieveRelevantChunks } from "@/lib/chat/retrieval";
 import { formatSseEvent, SSE_HEADERS } from "@/lib/chat/sse";
 import type { ChatSseEvent, ChatUsage } from "@/lib/chat/types";
+import {
+  isOverMonthlyUsageCap,
+  MONTHLY_USAGE_CAP_ERROR,
+} from "@/lib/chat/usage-cap";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { createClient } from "@/lib/supabase/server";
 
@@ -152,7 +157,7 @@ function sseResponse(stream: ReadableStream<Uint8Array>) {
 }
 
 /**
- * Streaming RAG chat: auth + org + rate-limit → retrieve → SSE → persist on success.
+ * Streaming RAG chat: auth + org + rate-limit + usage-cap → retrieve → SSE → persist on success.
  * Events: delta, citations, usage, conversation, done | error.
  */
 export async function POST(request: Request) {
@@ -210,13 +215,30 @@ export async function POST(request: Request) {
 
     const { data: org, error: orgError } = await supabase
       .from("organizations")
-      .select("system_prompt")
+      .select("system_prompt, token_budget")
       .eq("id", organizationId)
       .single();
 
     if (orgError || !org) {
       console.error("Error loading organization for chat", orgError);
       return jsonError("Organization not found", 400);
+    }
+
+    const tokenBudget =
+      typeof org.token_budget === "number" && org.token_budget > 0
+        ? org.token_budget
+        : null;
+
+    if (tokenBudget != null) {
+      try {
+        const orgTokensUsed = await sumOrgTokensUsed(supabase, organizationId);
+        if (isOverMonthlyUsageCap(orgTokensUsed, tokenBudget)) {
+          return jsonError(MONTHLY_USAGE_CAP_ERROR, 403);
+        }
+      } catch (usageError) {
+        console.error("Error checking org token usage cap", usageError);
+        return jsonError("Failed to check usage cap", 500);
+      }
     }
 
     const orgSystemPrompt =

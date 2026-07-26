@@ -34,6 +34,10 @@ import {
   TemplatesControl,
   TypingIndicator,
 } from "./chat-controls-ui";
+import {
+  isOverMonthlyUsageCap,
+  MONTHLY_USAGE_CAP_ERROR,
+} from "@/lib/chat/usage-cap";
 import { useChatSession } from "./chat-session-context";
 
 type ChatMessage = {
@@ -83,6 +87,23 @@ function citationLabel(citation: ChatCitation) {
 
 function formatMessageTokens(usage: ChatUsage) {
   return `${usage.totalTokens.toLocaleString()} tokens`;
+}
+
+function sumConversationTokens(messages: ChatMessage[]) {
+  return messages.reduce((sum, message) => {
+    if (message.role !== "assistant" || !message.usage) return sum;
+    return sum + message.usage.totalTokens;
+  }, 0);
+}
+
+function formatUsd(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    currencyDisplay: "symbol",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
 }
 
 function MessageSources({ citations }: { citations: ChatCitation[] }) {
@@ -151,7 +172,13 @@ function detailToMessages(detail: ConversationDetail): ChatMessage[] {
 
 export default function DashboardChat() {
   const queryClient = useQueryClient();
-  const { setSessionTokensUsed, adjustSessionTokensUsed } = useChatSession();
+  const {
+    setSessionTokensUsed,
+    adjustSessionTokensUsed,
+    costPerThousandTokens,
+    sessionTokensUsed,
+    tokenBudget,
+  } = useChatSession();
   const {
     model,
     jsonMode,
@@ -396,7 +423,7 @@ export default function DashboardChat() {
     e.preventDefault();
     // Handle empty input or streaming.
     const trimmed = input.trim();
-    if (!trimmed || isStreaming) return;
+    if (!trimmed || isStreaming || overMonthlyCap) return;
 
     // Create latest user message object.
     const userMessage: ChatMessage = {
@@ -418,7 +445,7 @@ export default function DashboardChat() {
   // Drop the last assistant turn and re-stream from the prior messages (same SSE path).
   // Session token total recomputes from remaining message usages (old reply removed, new usage added).
   const onRegenerate = () => {
-    if (isStreaming) return;
+    if (isStreaming || overMonthlyCap) return;
 
     const target = getRegenerateTarget(messages);
     if (!target) return;
@@ -483,10 +510,15 @@ export default function DashboardChat() {
 
   const isLoadingConversation = loadingConversationId !== null;
   const chatBusy = isStreaming || isLoadingConversation;
-  const regenerateTarget = chatBusy ? null : getRegenerateTarget(messages);
-  const canSend = !chatBusy && Boolean(input.trim());
+  const overMonthlyCap = isOverMonthlyUsageCap(sessionTokensUsed, tokenBudget);
+  const regenerateTarget =
+    chatBusy || overMonthlyCap ? null : getRegenerateTarget(messages);
+  const canSend = !chatBusy && !overMonthlyCap && Boolean(input.trim());
   const showEmptyState =
     messages.length === 0 && !isStreaming && !isLoadingConversation;
+  const sessionTokens = sumConversationTokens(messages);
+  const sessionCost = (sessionTokens / 1000) * costPerThousandTokens;
+  const showSessionUsage = messages.length > 0;
 
   return (
     <div className="grid h-full min-h-0 flex-1 grid-cols-[7fr_3fr] gap-4">
@@ -496,17 +528,28 @@ export default function DashboardChat() {
             <CardTitle className="text-base">Chat</CardTitle>
             <SystemPromptControl disabled={chatBusy} />
           </div>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-8 gap-1.5 text-xs"
-            onClick={onNewChat}
-            disabled={chatBusy}
-          >
-            <Plus className="size-3.5" />
-            New chat
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            {showSessionUsage ? (
+              <p
+                className="hidden text-xs text-muted-foreground sm:block"
+                aria-live="polite"
+              >
+                Session · {sessionTokens.toLocaleString()} tokens ·{" "}
+                {formatUsd(sessionCost)}
+              </p>
+            ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 gap-1.5 text-xs"
+              onClick={onNewChat}
+              disabled={chatBusy}
+            >
+              <Plus className="size-3.5" />
+              New chat
+            </Button>
+          </div>
         </CardHeader>
 
         <CardContent className="min-h-0 flex flex-1 flex-col overflow-hidden">
@@ -578,13 +621,22 @@ export default function DashboardChat() {
           </div>
         </CardContent>
 
-        <CardFooter>
+        <CardFooter className="flex flex-col gap-2">
+          {overMonthlyCap ? (
+            <p
+              className="w-full rounded-lg border border-rose-300/40 bg-rose-300/10 px-3 py-2 text-xs text-rose-200"
+              role="status"
+            >
+              {MONTHLY_USAGE_CAP_ERROR}
+            </p>
+          ) : null}
           <form onSubmit={onSubmit} className="w-full">
             <div
               className={[
                 "flex w-full flex-col rounded-xl border border-input bg-transparent shadow-xs transition-[color,box-shadow]",
                 "focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50",
                 "dark:bg-input/30",
+                overMonthlyCap ? "opacity-70" : "",
               ].join(" ")}
             >
               <Textarea
@@ -605,24 +657,26 @@ export default function DashboardChat() {
                 }}
                 placeholder="Ask a question…"
                 rows={1}
-                disabled={chatBusy}
+                disabled={chatBusy || overMonthlyCap}
                 className={[
                   "max-h-[7.5rem] min-h-10 resize-none overflow-y-auto border-0 bg-transparent px-3 pt-3 pb-2 shadow-none",
                   "field-sizing-content leading-5 md:text-sm",
                   "focus-visible:border-transparent focus-visible:ring-0",
                   "dark:bg-transparent",
-                  chatBusy ? "cursor-not-allowed opacity-70" : "",
+                  chatBusy || overMonthlyCap
+                    ? "cursor-not-allowed opacity-70"
+                    : "",
                 ].join(" ")}
               />
               <div className="flex items-center justify-between gap-2 px-2 pb-2">
                 <div className="flex min-w-0 items-center gap-1">
-                  <ModelSelect disabled={chatBusy} />
+                  <ModelSelect disabled={chatBusy || overMonthlyCap} />
                   <TemplatesControl
                     composerValue={input}
                     onInsert={setInput}
-                    disabled={chatBusy}
+                    disabled={chatBusy || overMonthlyCap}
                   />
-                  <JsonModeToggle disabled={chatBusy} />
+                  <JsonModeToggle disabled={chatBusy || overMonthlyCap} />
                 </div>
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -642,11 +696,13 @@ export default function DashboardChat() {
                     <p>
                       {canSend
                         ? "Send · Enter"
-                        : isStreaming
-                          ? "Waiting for reply…"
-                          : isLoadingConversation
-                            ? "Loading conversation…"
-                            : "Type a message to send"}
+                        : overMonthlyCap
+                          ? "Monthly usage cap reached"
+                          : isStreaming
+                            ? "Waiting for reply…"
+                            : isLoadingConversation
+                              ? "Loading conversation…"
+                              : "Type a message to send"}
                     </p>
                     <p className="text-muted-foreground">
                       Shift+Enter for new line

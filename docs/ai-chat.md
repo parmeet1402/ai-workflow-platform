@@ -39,6 +39,7 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | Server SSE framing | `apps/web/src/lib/chat/sse.ts` |
 | Client SSE reader | `apps/web/src/lib/chat/read-sse.ts` |
 | Usage estimate fallback | `apps/web/src/lib/chat/estimate-usage.ts` |
+| Monthly usage cap helper | `apps/web/src/lib/chat/usage-cap.ts` |
 | Session token context | `apps/web/src/app/dashboard/chat-session-context.tsx` |
 | Token budget footer | `apps/web/src/app/dashboard/token-budget-footer.tsx` |
 | Org settings API (token budget) | `apps/web/src/app/api/organization/route.ts` |
@@ -323,12 +324,14 @@ flowchart TB
 - Disabled while `isStreaming` is true (same concurrency guard as send).
 - Footer tokens adjust by `newTotal − oldTotal`, then reconcile from `orgTokensUsed` on history refetch.
 
-### Token usage (durable org total)
+### Token usage (org monthly meter + per-session cost)
 
 - Each assistant reply shows its `usage.totalTokens` once the `usage` event arrives.
 - `ChatSessionProvider` holds `sessionTokensUsed` seeded from `GET /api/conversations` → `orgTokensUsed` (sum of assistant `total_tokens` across the org).
 - Streaming adjusts that total immediately; history refetch reconciles from the database.
-- `TokenBudgetFooter` reads that sum. The org token budget is stored on `organizations.token_budget`, loaded on dashboard start into `ChatSessionProvider`, and saved via `PATCH /api/organization`. Cost uses `tokensUsed / 1000 * costPerThousandTokens` (default `0.01`). Default budget is `1000`.
+- `TokenBudgetFooter` presents that sum as **this month** vs the org **monthly cap** (`organizations.token_budget`, editable via `PATCH /api/organization`). Cost uses `tokensUsed / 1000 * costPerThousandTokens` (default `0.01`). Default cap is `1000`. (Period reset is still UI copy; the meter uses the lifetime org aggregate until a calendar window is added.)
+- Soft block when usage ≥ cap: composer shows a banner and disables send/regenerate; `POST /api/chat` returns **403** with the same message before retrieval/completion. Raising the cap via the footer modal unblocks. An in-flight stream that crosses the cap is allowed to finish; the next request is blocked.
+- The active chat header shows **Session · N tokens · $X.XX**, summed from assistant `usage` on the open conversation and recomputed when a stream (or regenerate) delivers a new `usage` event.
 
 `EventSource` is not used because the request is a **POST** with a JSON body.
 

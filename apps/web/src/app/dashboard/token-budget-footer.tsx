@@ -23,9 +23,9 @@ import { useChatSession } from "./chat-session-context";
 const tokenBudgetSchema = z.object({
   tokenBudget: z
     .number()
-    .int("Token budget must be a whole number")
-    .min(1, "Token budget must be at least 1")
-    .max(100000000, "Token budget is too large"),
+    .int("Monthly token cap must be a whole number")
+    .min(1, "Monthly token cap must be at least 1")
+    .max(100000000, "Monthly token cap is too large"),
 });
 
 type TokenBudgetValues = z.infer<typeof tokenBudgetSchema>;
@@ -41,15 +41,31 @@ function formatUsd(value: number) {
   }).format(value);
 }
 
+function usageStrokeClass(percent: number) {
+  if (percent > 90) return "stroke-rose-300";
+  if (percent > 70) return "stroke-amber-200";
+  return "stroke-primary";
+}
+
+function usageTextClass(percent: number) {
+  if (percent > 90) return "text-rose-300";
+  if (percent > 70) return "text-amber-200";
+  return undefined;
+}
+
 function RadialUsageChart({ used, budget }: { used: number; budget: number }) {
-  const ratio = budget > 0 ? Math.min(1, used / budget) : 0;
+  const rawRatio = budget > 0 ? used / budget : 0;
+  const ratio = Math.min(1, Math.max(0, rawRatio));
   const percent = Math.round(ratio * 100);
+  const overCap = rawRatio > 1;
 
   const size = 96;
   const stroke = 10;
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
   const offset = c * (1 - ratio);
+  const strokeClass = usageStrokeClass(overCap ? 101 : percent);
+  const textClass = usageTextClass(overCap ? 101 : percent);
 
   return (
     <div className="relative flex items-center justify-center">
@@ -68,7 +84,7 @@ function RadialUsageChart({ used, budget }: { used: number; budget: number }) {
           r={r}
           strokeWidth={stroke}
           strokeLinecap="round"
-          className="stroke-primary"
+          className={strokeClass}
           fill="transparent"
           strokeDasharray={c}
           strokeDashoffset={offset}
@@ -77,8 +93,12 @@ function RadialUsageChart({ used, budget }: { used: number; budget: number }) {
       </svg>
 
       <div className="absolute text-center">
-        <div className="text-sm font-semibold">{percent}%</div>
-        <div className="text-xs text-muted-foreground">used</div>
+        <div className={["text-sm font-semibold", textClass].filter(Boolean).join(" ")}>
+          {percent}%
+        </div>
+        <div className="text-xs text-muted-foreground">
+          {overCap ? "over cap" : "used"}
+        </div>
       </div>
     </div>
   );
@@ -125,7 +145,9 @@ export default function TokenBudgetFooter() {
 
       if (!res.ok) {
         throw new Error(
-          "error" in payload ? payload.error : "Failed to save token budget",
+          "error" in payload
+            ? payload.error
+            : "Failed to save monthly usage cap",
         );
       }
       if (!("tokenBudget" in payload)) {
@@ -136,7 +158,9 @@ export default function TokenBudgetFooter() {
       setOpen(false);
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Failed to save token budget",
+        error instanceof Error
+          ? error.message
+          : "Failed to save monthly usage cap",
       );
     }
   };
@@ -148,18 +172,18 @@ export default function TokenBudgetFooter() {
       <CardContent className="flex items-center justify-between gap-6">
           <div className="grid gap-1">
             <div className="text-sm">
-              <span className="font-medium">Token Usage:</span>{" "}
+              <span className="font-medium">This month:</span>{" "}
               {tokensUsed.toLocaleString()} / {tokenBudget.toLocaleString()}{" "}
               tokens
             </div>
             <div className="text-sm text-muted-foreground">
-              <span className="font-medium text-foreground">Cost:</span>{" "}
+              <span className="font-medium text-foreground">Cost this month:</span>{" "}
               {formatUsd(cost)}
             </div>
 
             <div className="mt-2 flex items-center gap-2">
               <div className="text-sm">
-                <span className="font-medium">Token Budget:</span>{" "}
+                <span className="font-medium">Monthly cap:</span>{" "}
                 {tokenBudget.toLocaleString()} tokens
               </div>
 
@@ -170,17 +194,17 @@ export default function TokenBudgetFooter() {
                   variant="ghost"
                   size="icon-sm"
                   onClick={() => setOpen(true)}
-                  aria-label="Edit token budget"
+                  aria-label="Edit monthly usage cap"
                 >
                   <Pencil className="size-4" />
                 </Button>
 
                 <DialogContent>
                   <DialogHeader>
-                    <DialogTitle>Edit Token Budget</DialogTitle>
+                    <DialogTitle>Edit monthly usage cap</DialogTitle>
                     <DialogDescription>
-                      Update your organization&apos;s token budget. This value
-                      is shared across the org.
+                      Shared across the org. Usage resets on the 1st of each
+                      month. Chat is blocked once the cap is reached.
                     </DialogDescription>
                   </DialogHeader>
 
@@ -193,7 +217,7 @@ export default function TokenBudgetFooter() {
                         htmlFor="tokenBudget"
                         className="text-sm font-medium"
                       >
-                        Token budget
+                        Monthly token cap
                       </label>
                       <Input
                         id="tokenBudget"
@@ -207,6 +231,10 @@ export default function TokenBudgetFooter() {
                           {errors.tokenBudget.message}
                         </p>
                       ) : null}
+                      <p className="text-xs text-muted-foreground">
+                        Used this month: {tokensUsed.toLocaleString()} ·{" "}
+                        {formatUsd(cost)} at current rate
+                      </p>
                     </div>
 
                     <DialogFooter>
