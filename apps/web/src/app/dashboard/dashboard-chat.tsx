@@ -291,7 +291,7 @@ export default function DashboardChat() {
             messages: apiMessages,
             conversationId: conversationIdRef.current,
             regenerate: options?.regenerate === true,
-            // model / jsonMode: UI ready; backend may ignore until later slices.
+            // jsonMode: UI ready; backend may ignore until later slices.
             // System prompt is org-scoped and loaded server-side from organizations.
             model: controls.model,
             jsonMode: controls.jsonMode,

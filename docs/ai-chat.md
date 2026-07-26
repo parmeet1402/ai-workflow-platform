@@ -28,7 +28,8 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | Conversation detail | `apps/web/src/app/api/conversations/[conversationId]/route.ts` |
 | Persist helpers | `apps/web/src/lib/chat/persist.ts` |
 | Conversation DTOs | `apps/web/src/types/conversation.ts` |
-| OpenAI client / models | `apps/web/src/lib/chat/openai.ts` |
+| OpenAI client | `apps/web/src/lib/chat/openai.ts` |
+| Allowlisted chat models | `apps/web/src/lib/chat/models.ts` |
 | Vector retrieval (embed + KNN SQL) | `apps/web/src/lib/chat/retrieval.ts` |
 | System prompt + citations helpers | `apps/web/src/lib/chat/prompt.ts` |
 | Shared types (citations, usage, SSE) | `apps/web/src/lib/chat/types.ts` |
@@ -51,7 +52,7 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | Variable | Role |
 |----------|------|
 | `OPENAI_API_KEY` | **Server only**. Embeddings + chat completions on the web tier. |
-| `CHAT_MODEL` | Optional. Completion model (default `gpt-4o-mini`). |
+| `CHAT_MODEL` | Optional. Fallback completion model when the request omits `model` (default `gpt-4o-mini`). Request `model` must still be an allowlisted id from `models.ts`. |
 | `CHAT_EMBEDDING_MODEL` | Optional. Must match the worker (`text-embedding-3-small`, 1536 dims). |
 | `RAG_MATCH_COUNT` | Optional. Top-k chunks for retrieval (default `6`, clamped 1–32). |
 | `DATABASE_URL` | **Server only**. Supabase Postgres/pooler URI for pgvector KNN. Never `NEXT_PUBLIC_`. |
@@ -128,7 +129,7 @@ sequenceDiagram
   participant OAI as OpenAI
   participant PG as Postgres
 
-  UI->>API: POST { messages, conversationId? } (cookies)
+  UI->>API: POST { messages, conversationId?, model? } (cookies)
   API->>API: getUser + membership + rate-limit
   API->>OAI: embeddings.create(question)
   OAI-->>API: query vector (1536)
@@ -160,7 +161,7 @@ Same pattern as document APIs:
 2. `checkRateLimit(\`chat:${user.id}\`, 20 / 60s)` → **429** + `Retry-After` if exceeded.
 3. `memberships.select("organization_id")` → **400** if no org.
 4. Load `organizations.system_prompt` for that org (null/empty → built-in `RAG_SYSTEM_PROMPT`). The chat body does **not** accept a client system prompt; source of truth is the org row.
-5. Parse/validate body: non-empty `messages` (max 40), each `{ role: "user" | "assistant", content }` (max 8 000 chars, trimmed non-empty); optional `conversationId` (UUID); optional `regenerate: true` (requires `conversationId`).
+5. Parse/validate body: non-empty `messages` (max 40), each `{ role: "user" | "assistant", content }` (max 8 000 chars, trimmed non-empty); optional `conversationId` (UUID); optional `regenerate: true` (requires `conversationId`); optional `model` (must be an allowlisted id from `lib/chat/models.ts` — currently `gpt-4o-mini`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1-nano`; invalid → **400**). Omitted/`null`/empty → `CHAT_MODEL` env or `gpt-4o-mini`.
 6. Last **user** message is the retrieval query; missing user turn → **400**.
 7. If `conversationId` is set, verify the conversation belongs to the user in their org → **404** / **500** otherwise.
 
@@ -195,7 +196,7 @@ The default instructions tell the model to answer only from context and to say w
 
 After retrieval, the handler returns `Content-Type: text/event-stream` and a `ReadableStream` that:
 
-1. Calls `chat.completions.create({ stream: true, stream_options: { include_usage: true } })` with `request.signal`.
+1. Calls `chat.completions.create({ model, stream: true, stream_options: { include_usage: true } })` with `request.signal`. `model` is the allowlisted body value when present, otherwise `getChatModel()` (`CHAT_MODEL` / `gpt-4o-mini`).
 2. For each chunk with `delta.content`, enqueues `delta`.
 3. Captures `usage` from the final provider chunk when present (`stream_options.include_usage`). If the provider omits usage (or returns zeros), falls back to a chars/4 estimate over the RAG prompt texts + accumulated completion (`estimateChatUsage`).
 4. If the client aborted, closes without terminal events (and **without** persisting).
@@ -286,7 +287,7 @@ flowchart TB
 
 1. On submit, append the user turn and call `streamChat(toApiMessages(...))` (strips the welcome message).
 2. Create an empty assistant message; show “Assistant is thinking…” until the first `delta`.
-3. `fetch("/api/chat", { credentials: "include", signal, body: { messages, conversationId, regenerate? } })`.
+3. `fetch("/api/chat", { credentials: "include", signal, body: { messages, conversationId, regenerate?, model? } })`. Model comes from chat controls (localStorage via `ChatControlsProvider`); allowlisted ids only.
 4. If the response is not `text/event-stream`, treat the body as JSON error.
 5. Otherwise `readChatSse` buffers network chunks, splits on `\n\n`, and dispatches typed events:
    - `delta` → append text to the assistant bubble

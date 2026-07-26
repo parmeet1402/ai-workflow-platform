@@ -6,6 +6,7 @@ import {
   estimateChatUsage,
   hasProviderUsage,
 } from "@/lib/chat/estimate-usage";
+import { isChatModelId, type ChatModelId } from "@/lib/chat/models";
 import {
   createOpenAIClient,
   getChatModel,
@@ -39,6 +40,7 @@ type ParsedChatBody = {
   messages: Array<{ role: "user" | "assistant"; content: string }>;
   conversationId: string | null;
   regenerate: boolean;
+  model: ChatModelId | null;
 };
 
 function jsonError(error: string, status: number, headers?: HeadersInit) {
@@ -62,6 +64,7 @@ function validateAndParseBody(body: unknown): ParsedChatBody | { error: string }
     messages?: unknown;
     conversationId?: unknown;
     regenerate?: unknown;
+    model?: unknown;
   };
 
   const messagesRaw = record.messages;
@@ -107,10 +110,19 @@ function validateAndParseBody(body: unknown): ParsedChatBody | { error: string }
     return { error: "regenerate requires conversationId" };
   }
 
+  let model: ChatModelId | null = null;
+  if (record.model != null && record.model !== "") {
+    if (typeof record.model !== "string" || !isChatModelId(record.model)) {
+      return { error: "model must be an allowlisted chat model id" };
+    }
+    model = record.model;
+  }
+
   return {
     messages,
     conversationId: conversationId as string | null,
     regenerate,
+    model,
   };
 }
 
@@ -259,6 +271,7 @@ export async function POST(request: Request) {
     const encoder = new TextEncoder();
     const requestConversationId = parsed.conversationId;
     const requestRegenerate = parsed.regenerate;
+    const completionModel = parsed.model ?? getChatModel();
 
     const stream = new ReadableStream<Uint8Array>({
       // controller is used to enqueue the stream of data from the server.
@@ -273,7 +286,7 @@ export async function POST(request: Request) {
         try {
           const completion = await openai.chat.completions.create(
             {
-              model: getChatModel(),
+              model: completionModel,
               messages: ragMessages,
               stream: true,
               stream_options: { include_usage: true },
