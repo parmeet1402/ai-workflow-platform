@@ -129,7 +129,7 @@ sequenceDiagram
   participant OAI as OpenAI
   participant PG as Postgres
 
-  UI->>API: POST { messages, conversationId?, model? } (cookies)
+  UI->>API: POST { messages, conversationId?, model?, jsonMode? } (cookies)
   API->>API: getUser + membership + rate-limit
   API->>OAI: embeddings.create(question)
   OAI-->>API: query vector (1536)
@@ -161,7 +161,7 @@ Same pattern as document APIs:
 2. `checkRateLimit(\`chat:${user.id}\`, 20 / 60s)` → **429** + `Retry-After` if exceeded.
 3. `memberships.select("organization_id")` → **400** if no org.
 4. Load `organizations.system_prompt` for that org (null/empty → built-in `RAG_SYSTEM_PROMPT`). The chat body does **not** accept a client system prompt; source of truth is the org row.
-5. Parse/validate body: non-empty `messages` (max 40), each `{ role: "user" | "assistant", content }` (max 8 000 chars, trimmed non-empty); optional `conversationId` (UUID); optional `regenerate: true` (requires `conversationId`); optional `model` (must be an allowlisted id from `lib/chat/models.ts` — currently `gpt-4o-mini`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1-nano`; invalid → **400**). Omitted/`null`/empty → `CHAT_MODEL` env or `gpt-4o-mini`.
+5. Parse/validate body: non-empty `messages` (max 40), each `{ role: "user" | "assistant", content }` (max 8 000 chars, trimmed non-empty); optional `conversationId` (UUID); optional `regenerate: true` (requires `conversationId`); optional `model` (must be an allowlisted id from `lib/chat/models.ts` — currently `gpt-4o-mini`, `gpt-5-mini`, `gpt-5-nano`, `gpt-4.1-nano`; invalid → **400**). Omitted/`null`/empty → `CHAT_MODEL` env or `gpt-4o-mini`. Optional `jsonMode` (boolean; non-boolean → **400**). `true` forces structured JSON (see below); omitted/`false` → normal prose.
 6. Last **user** message is the retrieval query; missing user turn → **400**.
 7. If `conversationId` is set, verify the conversation belongs to the user in their org → **404** / **500** otherwise.
 
@@ -187,16 +187,18 @@ Misconfiguration (`OPENAI_API_KEY` / `DATABASE_URL`) before the stream starts re
 
 `buildRagMessages` (`lib/chat/prompt.ts`) builds a **single-turn** completion:
 
-- **System:** instruction block + labeled chunk excerpts (document name, optional page, similarity). Instruction block is `organizations.system_prompt` when set; otherwise the built-in `RAG_SYSTEM_PROMPT`. Document context is always appended.
+- **System:** instruction block + labeled chunk excerpts (document name, optional page, similarity). Instruction block is `organizations.system_prompt` when set; otherwise the built-in `RAG_SYSTEM_PROMPT`. Document context is always appended. When `jsonMode` is true, also appends `Respond with valid JSON only.`
 - **User:** the last question.
 
 The default instructions tell the model to answer only from context and to say when the documents do not contain the answer. `chunksToCitations` dedupes by `documentId` + page (cap 8) for the later `citations` event.
+
+**JSON mode:** Any org member can toggle it in the composer (client-side only; not stored on `messages` rows). When `jsonMode: true`, the API (1) appends the JSON-only instruction above and (2) passes `response_format: { type: "json_object" }` to OpenAI. Citations / usage / conversation SSE events are unchanged. Toggle off → normal prose completion (no `response_format`).
 
 ### 4. OpenAI stream → SSE
 
 After retrieval, the handler returns `Content-Type: text/event-stream` and a `ReadableStream` that:
 
-1. Calls `chat.completions.create({ model, stream: true, stream_options: { include_usage: true } })` with `request.signal`. `model` is the allowlisted body value when present, otherwise `getChatModel()` (`CHAT_MODEL` / `gpt-4o-mini`).
+1. Calls `chat.completions.create({ model, stream: true, stream_options: { include_usage: true }, response_format? })` with `request.signal`. `model` is the allowlisted body value when present, otherwise `getChatModel()` (`CHAT_MODEL` / `gpt-4o-mini`). When `jsonMode` is true, includes `response_format: { type: "json_object" }`.
 2. For each chunk with `delta.content`, enqueues `delta`.
 3. Captures `usage` from the final provider chunk when present (`stream_options.include_usage`). If the provider omits usage (or returns zeros), falls back to a chars/4 estimate over the RAG prompt texts + accumulated completion (`estimateChatUsage`).
 4. If the client aborted, closes without terminal events (and **without** persisting).
@@ -287,7 +289,7 @@ flowchart TB
 
 1. On submit, append the user turn and call `streamChat(toApiMessages(...))` (strips the welcome message).
 2. Create an empty assistant message; show “Assistant is thinking…” until the first `delta`.
-3. `fetch("/api/chat", { credentials: "include", signal, body: { messages, conversationId, regenerate?, model? } })`. Model comes from chat controls (localStorage via `ChatControlsProvider`); allowlisted ids only.
+3. `fetch("/api/chat", { credentials: "include", signal, body: { messages, conversationId, regenerate?, model?, jsonMode? } })`. Model and JSON mode come from chat controls (localStorage via `ChatControlsProvider`); model ids are allowlisted. `jsonMode: true` forces structured JSON from the API.
 4. If the response is not `text/event-stream`, treat the body as JSON error.
 5. Otherwise `readChatSse` buffers network chunks, splits on `\n\n`, and dispatches typed events:
    - `delta` → append text to the assistant bubble

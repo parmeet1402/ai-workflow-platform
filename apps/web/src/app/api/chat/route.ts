@@ -41,6 +41,7 @@ type ParsedChatBody = {
   conversationId: string | null;
   regenerate: boolean;
   model: ChatModelId | null;
+  jsonMode: boolean;
 };
 
 function jsonError(error: string, status: number, headers?: HeadersInit) {
@@ -65,6 +66,7 @@ function validateAndParseBody(body: unknown): ParsedChatBody | { error: string }
     conversationId?: unknown;
     regenerate?: unknown;
     model?: unknown;
+    jsonMode?: unknown;
   };
 
   const messagesRaw = record.messages;
@@ -118,11 +120,20 @@ function validateAndParseBody(body: unknown): ParsedChatBody | { error: string }
     model = record.model;
   }
 
+  if (
+    record.jsonMode != null &&
+    typeof record.jsonMode !== "boolean"
+  ) {
+    return { error: "jsonMode must be a boolean" };
+  }
+  const jsonMode = record.jsonMode === true;
+
   return {
     messages,
     conversationId: conversationId as string | null,
     regenerate,
     model,
+    jsonMode,
   };
 }
 
@@ -266,12 +277,14 @@ export async function POST(request: Request) {
       question,
       chunks,
       systemPrompt: orgSystemPrompt,
+      jsonMode: parsed.jsonMode,
     });
 
     const encoder = new TextEncoder();
     const requestConversationId = parsed.conversationId;
     const requestRegenerate = parsed.regenerate;
     const completionModel = parsed.model ?? getChatModel();
+    const jsonMode = parsed.jsonMode;
 
     const stream = new ReadableStream<Uint8Array>({
       // controller is used to enqueue the stream of data from the server.
@@ -290,6 +303,9 @@ export async function POST(request: Request) {
               messages: ragMessages,
               stream: true,
               stream_options: { include_usage: true },
+              ...(jsonMode
+                ? { response_format: { type: "json_object" as const } }
+                : {}),
             },
             { signal: request.signal },
           );

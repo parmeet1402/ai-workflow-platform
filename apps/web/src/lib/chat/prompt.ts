@@ -10,6 +10,9 @@ Rules:
 
 const DEFAULT_CITATION_CAP = 8;
 
+/** Appended when JSON mode is on so OpenAI `json_object` responses stay valid. */
+export const JSON_MODE_INSTRUCTION = "Respond with valid JSON only.";
+
 /**
  * Format retrieved chunks into a labeled context block for the system/user prompt.
  */
@@ -33,14 +36,18 @@ export function formatRetrievedContext(chunks: RetrievedChunk[]): string {
  * Build the grounded system message (instructions + retrieved excerpts).
  * When `systemPrompt` is provided (non-empty after trim), it replaces the
  * built-in instruction block; document context is always appended.
+ * When `jsonMode` is true, appends {@link JSON_MODE_INSTRUCTION}.
  */
 export function buildRagSystemMessage(
   chunks: RetrievedChunk[],
   systemPrompt?: string | null,
+  jsonMode = false,
 ): string {
   const trimmed = systemPrompt?.trim();
   const instructions = trimmed || RAG_SYSTEM_PROMPT;
-  return `${instructions}\n\nDocument context:\n${formatRetrievedContext(chunks)}`;
+  const base = `${instructions}\n\nDocument context:\n${formatRetrievedContext(chunks)}`;
+  if (!jsonMode) return base;
+  return `${base}\n\n${JSON_MODE_INSTRUCTION}`;
 }
 
 /**
@@ -52,12 +59,18 @@ export function buildRagMessages(options: {
   chunks: RetrievedChunk[];
   /** Owner-supplied instructions; empty/omitted uses {@link RAG_SYSTEM_PROMPT}. */
   systemPrompt?: string | null;
+  /** When true, append JSON-only instruction (pair with OpenAI `response_format`). */
+  jsonMode?: boolean;
 }): Array<{ role: "system" | "user"; content: string }> {
   const question = options.question.trim();
   return [
     {
       role: "system",
-      content: buildRagSystemMessage(options.chunks, options.systemPrompt),
+      content: buildRagSystemMessage(
+        options.chunks,
+        options.systemPrompt,
+        options.jsonMode === true,
+      ),
     },
     { role: "user", content: question },
   ];
