@@ -4,10 +4,8 @@ import * as React from "react";
 import {
   createEmptyStore,
   DRAFT_CHAT_KEY,
-  effectiveSystemPrompt,
   getBuiltInSystemPrompt,
   getOrCreateChatControls,
-  isCustomSystemPrompt,
   loadChatControlsStore,
   resolveChatKey,
   saveChatControlsStore,
@@ -22,9 +20,11 @@ export type SettingsTab = "system" | "templates";
 type ChatControlsContextValue = {
   ready: boolean;
   chatKey: string;
-  defaultSystemPrompt: string;
+  /** Effective org system prompt (built-in when org has none). */
   systemPrompt: string;
+  /** True when the org has a custom prompt stored. */
   isCustomSystemPrompt: boolean;
+  systemPromptSaving: boolean;
   model: ChatModelId;
   jsonMode: boolean;
   templates: PromptTemplate[];
@@ -33,11 +33,10 @@ type ChatControlsContextValue = {
   setActiveConversation: (conversationId: string | null) => void;
   /** Reset draft-chat overrides so a new chat inherits defaults. */
   prepareNewChat: () => void;
-  setSystemPromptForChat: (prompt: string) => void;
-  resetSystemPromptForChat: () => void;
-  setDefaultSystemPrompt: (prompt: string) => void;
-  resetDefaultSystemPrompt: () => void;
-  applySystemPromptAsDefault: (prompt?: string) => void;
+  /** Persist org-wide system prompt (owner only; enforced by API). */
+  saveSystemPrompt: (prompt: string) => Promise<void>;
+  /** Clear org system prompt so chat uses the built-in RAG instructions. */
+  resetSystemPrompt: () => Promise<void>;
   setModel: (model: ChatModelId) => void;
   setJsonMode: (on: boolean) => void;
   addTemplate: (input: { name: string; body: string }) => PromptTemplate;
@@ -70,6 +69,12 @@ function upsertChat(
   };
 }
 
+function normalizeOrgSystemPrompt(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 export function ChatControlsProvider({
   children,
 }: {
@@ -77,6 +82,10 @@ export function ChatControlsProvider({
 }) {
   const [store, setStore] = React.useState<ChatControlsStore>(createEmptyStore);
   const [ready, setReady] = React.useState(false);
+  const [orgSystemPrompt, setOrgSystemPrompt] = React.useState<string | null>(
+    null,
+  );
+  const [systemPromptSaving, setSystemPromptSaving] = React.useState(false);
   const [conversationId, setConversationId] = React.useState<string | null>(
     null,
   );
@@ -95,11 +104,38 @@ export function ChatControlsProvider({
   }, [ready, store]);
 
   React.useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const res = await fetch("/api/organization", {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!res.ok) return;
+        const payload = (await res.json()) as {
+          systemPrompt?: unknown;
+        };
+        if (cancelled) return;
+        setOrgSystemPrompt(normalizeOrgSystemPrompt(payload.systemPrompt));
+      } catch {
+        // Keep built-in prompt in UI if org settings fail to load.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  React.useEffect(() => {
     conversationIdRef.current = conversationId;
   }, [conversationId]);
 
   const chatKey = resolveChatKey(conversationId);
   const chat = getOrCreateChatControls(store, chatKey);
+  const systemPrompt = orgSystemPrompt ?? getBuiltInSystemPrompt();
+  const isCustomSystemPrompt = orgSystemPrompt != null;
 
   const setActiveConversation = React.useCallback((nextId: string | null) => {
     const prevKey = resolveChatKey(conversationIdRef.current);
@@ -140,47 +176,61 @@ export function ChatControlsProvider({
     }));
   }, []);
 
-  const setSystemPromptForChat = React.useCallback(
-    (prompt: string) => {
-      setStore((prev) =>
-        upsertChat(prev, chatKey, { systemPrompt: prompt }),
-      );
-    },
-    [chatKey],
-  );
-
-  const resetSystemPromptForChat = React.useCallback(() => {
-    setStore((prev) => upsertChat(prev, chatKey, { systemPrompt: null }));
-  }, [chatKey]);
-
-  const setDefaultSystemPrompt = React.useCallback((prompt: string) => {
-    setStore((prev) => ({
-      ...prev,
-      defaultSystemPrompt: prompt,
-    }));
-  }, []);
-
-  const resetDefaultSystemPrompt = React.useCallback(() => {
-    setStore((prev) => ({
-      ...prev,
-      defaultSystemPrompt: getBuiltInSystemPrompt(),
-    }));
-  }, []);
-
-  const applySystemPromptAsDefault = React.useCallback(
-    (prompt?: string) => {
-      setStore((prev) => {
-        const currentChat = getOrCreateChatControls(prev, chatKey);
-        const next = prompt ?? effectiveSystemPrompt(prev, currentChat);
-        return upsertChat(
-          { ...prev, defaultSystemPrompt: next },
-          chatKey,
-          { systemPrompt: null },
-        );
+  const saveSystemPrompt = React.useCallback(async (prompt: string) => {
+    const trimmed = prompt.trim();
+    if (!trimmed) {
+      throw new Error("System prompt cannot be empty");
+    }
+    setSystemPromptSaving(true);
+    try {
+      const res = await fetch("/api/organization", {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ systemPrompt: trimmed }),
       });
-    },
-    [chatKey],
-  );
+      const payload = (await res.json()) as
+        | { systemPrompt: string | null }
+        | { error: string };
+      if (!res.ok) {
+        throw new Error(
+          "error" in payload ? payload.error : "Failed to save system prompt",
+        );
+      }
+      if (!("systemPrompt" in payload)) {
+        throw new Error("Invalid response from server");
+      }
+      setOrgSystemPrompt(normalizeOrgSystemPrompt(payload.systemPrompt));
+    } finally {
+      setSystemPromptSaving(false);
+    }
+  }, []);
+
+  const resetSystemPrompt = React.useCallback(async () => {
+    setSystemPromptSaving(true);
+    try {
+      const res = await fetch("/api/organization", {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ systemPrompt: null }),
+      });
+      const payload = (await res.json()) as
+        | { systemPrompt: string | null }
+        | { error: string };
+      if (!res.ok) {
+        throw new Error(
+          "error" in payload ? payload.error : "Failed to reset system prompt",
+        );
+      }
+      if (!("systemPrompt" in payload)) {
+        throw new Error("Invalid response from server");
+      }
+      setOrgSystemPrompt(normalizeOrgSystemPrompt(payload.systemPrompt));
+    } finally {
+      setSystemPromptSaving(false);
+    }
+  }, []);
 
   const setModel = React.useCallback(
     (model: ChatModelId) => {
@@ -257,9 +307,9 @@ export function ChatControlsProvider({
     () => ({
       ready,
       chatKey,
-      defaultSystemPrompt: store.defaultSystemPrompt,
-      systemPrompt: effectiveSystemPrompt(store, chat),
-      isCustomSystemPrompt: isCustomSystemPrompt(store, chat),
+      systemPrompt,
+      isCustomSystemPrompt,
+      systemPromptSaving,
       model: chat.model,
       jsonMode: chat.jsonMode,
       templates: store.templates,
@@ -267,11 +317,8 @@ export function ChatControlsProvider({
       settingsTab,
       setActiveConversation,
       prepareNewChat,
-      setSystemPromptForChat,
-      resetSystemPromptForChat,
-      setDefaultSystemPrompt,
-      resetDefaultSystemPrompt,
-      applySystemPromptAsDefault,
+      saveSystemPrompt,
+      resetSystemPrompt,
       setModel,
       setJsonMode,
       addTemplate,
@@ -284,17 +331,18 @@ export function ChatControlsProvider({
     [
       ready,
       chatKey,
-      store,
-      chat,
+      systemPrompt,
+      isCustomSystemPrompt,
+      systemPromptSaving,
+      store.templates,
+      chat.model,
+      chat.jsonMode,
       settingsOpen,
       settingsTab,
       setActiveConversation,
       prepareNewChat,
-      setSystemPromptForChat,
-      resetSystemPromptForChat,
-      setDefaultSystemPrompt,
-      resetDefaultSystemPrompt,
-      applySystemPromptAsDefault,
+      saveSystemPrompt,
+      resetSystemPrompt,
       setModel,
       setJsonMode,
       addTemplate,

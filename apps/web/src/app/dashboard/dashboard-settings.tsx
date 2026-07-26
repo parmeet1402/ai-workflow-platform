@@ -29,32 +29,42 @@ import { useChatControls, type SettingsTab } from "./chat-controls-context";
 
 function SystemPromptSettings() {
   const {
-    defaultSystemPrompt,
-    setDefaultSystemPrompt,
-    resetDefaultSystemPrompt,
-    setSystemPromptForChat,
+    systemPrompt,
+    systemPromptSaving,
+    saveSystemPrompt,
+    resetSystemPrompt,
   } = useChatControls();
 
-  const [draft, setDraft] = React.useState(defaultSystemPrompt);
-  const [applyToCurrentChat, setApplyToCurrentChat] = React.useState(false);
+  const [draft, setDraft] = React.useState(systemPrompt);
 
   React.useEffect(() => {
-    setDraft(defaultSystemPrompt);
-  }, [defaultSystemPrompt]);
+    setDraft(systemPrompt);
+  }, [systemPrompt]);
 
-  const onSave = () => {
+  const onSave = async () => {
     const next = draft.trim() || getBuiltInSystemPrompt();
-    setDefaultSystemPrompt(next);
-    if (applyToCurrentChat) {
-      setSystemPromptForChat(next);
+    try {
+      await saveSystemPrompt(next);
+      toast.success("Organization system prompt saved");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to save system prompt",
+      );
     }
-    toast.success("Default system prompt saved");
   };
 
-  const onReset = () => {
-    resetDefaultSystemPrompt();
-    setDraft(getBuiltInSystemPrompt());
-    toast.success("Reset to built-in default");
+  const onReset = async () => {
+    try {
+      await resetSystemPrompt();
+      setDraft(getBuiltInSystemPrompt());
+      toast.success("Reset to built-in default");
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Failed to reset system prompt",
+      );
+    }
   };
 
   return (
@@ -62,32 +72,31 @@ function SystemPromptSettings() {
       <div className="space-y-1.5">
         <Label htmlFor="settings-system-prompt">System prompt</Label>
         <p className="text-xs text-muted-foreground">
-          Default for new chats. Individual chats can override this from the
-          chat header.
+          Organization-wide. Applies to every member&apos;s chats.
         </p>
         <Textarea
           id="settings-system-prompt"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           className="min-h-48 font-mono text-xs"
+          disabled={systemPromptSaving}
         />
       </div>
 
-      <label className="flex items-center gap-2 text-xs text-muted-foreground">
-        <input
-          type="checkbox"
-          className="size-3.5 accent-primary"
-          checked={applyToCurrentChat}
-          onChange={(e) => setApplyToCurrentChat(e.target.checked)}
-        />
-        Also apply to the current chat
-      </label>
-
       <DialogFooter className="gap-2 sm:justify-between">
-        <Button type="button" variant="outline" onClick={onReset}>
+        <Button
+          type="button"
+          variant="outline"
+          disabled={systemPromptSaving}
+          onClick={() => void onReset()}
+        >
           Reset to default
         </Button>
-        <Button type="button" onClick={onSave}>
+        <Button
+          type="button"
+          disabled={systemPromptSaving}
+          onClick={() => void onSave()}
+        >
           Save
         </Button>
       </DialogFooter>
@@ -278,7 +287,7 @@ export default function DashboardSettings() {
             <DialogTitle>Settings</DialogTitle>
             <DialogDescription>
               {canEditSystemPrompt
-                ? "System prompt defaults and prompt templates. Chat model and JSON mode stay in the chat column."
+                ? "Organization system prompt and prompt templates. Chat model and JSON mode stay in the chat column."
                 : "Prompt templates. Chat model and JSON mode stay in the chat column."}
             </DialogDescription>
           </DialogHeader>

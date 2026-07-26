@@ -19,14 +19,12 @@ import {
   RefreshCw,
   SendIcon,
 } from "lucide-react";
-import { canAdjustSystemPrompt } from "@/lib/auth/roles";
 import { readChatSse } from "@/lib/chat/read-sse";
 import type { ChatCitation, ChatUsage } from "@/lib/chat/types";
 import type {
   ConversationDetail,
   ConversationListItem,
 } from "@/types/conversation";
-import { useAuth } from "@/features/auth/useAuth";
 import { useChatControls } from "./chat-controls-context";
 import {
   JsonModeBadge,
@@ -154,15 +152,12 @@ function detailToMessages(detail: ConversationDetail): ChatMessage[] {
 export default function DashboardChat() {
   const queryClient = useQueryClient();
   const { setSessionTokensUsed, adjustSessionTokensUsed } = useChatSession();
-  const { role } = useAuth();
   const {
     model,
-    systemPrompt,
     jsonMode,
     setActiveConversation,
     prepareNewChat,
   } = useChatControls();
-  const canSetSystemPrompt = canAdjustSystemPrompt(role);
   const [conversationId, setConversationId] = React.useState<string | null>(
     null,
   );
@@ -177,9 +172,7 @@ export default function DashboardChat() {
   const conversationIdRef = React.useRef<string | null>(null);
   const controlsRef = React.useRef({
     model,
-    systemPrompt,
     jsonMode,
-    canSetSystemPrompt,
   });
 
   React.useEffect(() => {
@@ -190,11 +183,9 @@ export default function DashboardChat() {
   React.useEffect(() => {
     controlsRef.current = {
       model,
-      systemPrompt,
       jsonMode,
-      canSetSystemPrompt,
     };
-  }, [model, systemPrompt, jsonMode, canSetSystemPrompt]);
+  }, [model, jsonMode]);
 
   React.useEffect(() => {
     return () => {
@@ -301,11 +292,9 @@ export default function DashboardChat() {
             conversationId: conversationIdRef.current,
             regenerate: options?.regenerate === true,
             // model / jsonMode: UI ready; backend may ignore until later slices.
+            // System prompt is org-scoped and loaded server-side from organizations.
             model: controls.model,
             jsonMode: controls.jsonMode,
-            ...(controls.canSetSystemPrompt
-              ? { systemPrompt: controls.systemPrompt }
-              : {}),
           }),
           signal: controller.signal,
         });

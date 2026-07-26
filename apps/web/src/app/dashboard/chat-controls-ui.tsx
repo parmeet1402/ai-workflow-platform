@@ -111,20 +111,18 @@ export function SystemPromptControl({ disabled }: { disabled?: boolean }) {
   const {
     systemPrompt,
     isCustomSystemPrompt,
-    setSystemPromptForChat,
-    resetSystemPromptForChat,
-    applySystemPromptAsDefault,
+    systemPromptSaving,
+    saveSystemPrompt,
+    resetSystemPrompt,
     openSettings,
   } = useChatControls();
 
   const [open, setOpen] = React.useState(false);
   const [draft, setDraft] = React.useState(systemPrompt);
-  const [applyAsDefault, setApplyAsDefault] = React.useState(false);
 
   React.useEffect(() => {
     if (open) {
       setDraft(systemPrompt);
-      setApplyAsDefault(false);
     }
   }, [open, systemPrompt]);
 
@@ -132,29 +130,37 @@ export function SystemPromptControl({ disabled }: { disabled?: boolean }) {
     return null;
   }
 
-  const onSave = () => {
+  const busy = disabled || systemPromptSaving;
+
+  const onSave = async () => {
     const next = draft.trim();
     if (!next) {
       toast.error("System prompt cannot be empty");
       return;
     }
-    if (applyAsDefault) {
-      applySystemPromptAsDefault(next);
-    } else {
-      setSystemPromptForChat(next);
+    try {
+      await saveSystemPrompt(next);
+      setOpen(false);
+      toast.success("Organization system prompt saved");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to save system prompt",
+      );
     }
-    setOpen(false);
-    toast.success(
-      applyAsDefault
-        ? "Saved and set as default for new chats"
-        : "Prompt saved for this chat",
-    );
   };
 
-  const onReset = () => {
-    resetSystemPromptForChat();
-    setOpen(false);
-    toast.success("Using default prompt");
+  const onReset = async () => {
+    try {
+      await resetSystemPrompt();
+      setOpen(false);
+      toast.success("Reset to built-in default");
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Failed to reset system prompt",
+      );
+    }
   };
 
   return (
@@ -165,7 +171,7 @@ export function SystemPromptControl({ disabled }: { disabled?: boolean }) {
           variant="ghost"
           size="sm"
           className="h-8 gap-1.5 px-2 text-xs text-muted-foreground"
-          disabled={disabled}
+          disabled={busy}
         >
           {isCustomSystemPrompt ? (
             <span
@@ -183,7 +189,7 @@ export function SystemPromptControl({ disabled }: { disabled?: boolean }) {
         <PopoverHeader>
           <PopoverTitle>System prompt</PopoverTitle>
           <PopoverDescription>
-            Applies to this chat. New chats inherit your Settings default.
+            Organization-wide. Applies to every member&apos;s chats.
           </PopoverDescription>
         </PopoverHeader>
 
@@ -191,17 +197,8 @@ export function SystemPromptControl({ disabled }: { disabled?: boolean }) {
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           className="min-h-36 font-mono text-xs"
+          disabled={systemPromptSaving}
         />
-
-        <label className="flex items-center gap-2 text-xs text-muted-foreground">
-          <input
-            type="checkbox"
-            className="size-3.5 accent-primary"
-            checked={applyAsDefault}
-            onChange={(e) => setApplyAsDefault(e.target.checked)}
-          />
-          Apply as default for new chats
-        </label>
 
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Button
@@ -209,6 +206,7 @@ export function SystemPromptControl({ disabled }: { disabled?: boolean }) {
             variant="link"
             size="sm"
             className="h-auto px-0 text-xs"
+            disabled={systemPromptSaving}
             onClick={() => {
               setOpen(false);
               openSettings("system");
@@ -217,10 +215,21 @@ export function SystemPromptControl({ disabled }: { disabled?: boolean }) {
             Open in Settings
           </Button>
           <div className="flex gap-2">
-            <Button type="button" variant="outline" size="sm" onClick={onReset}>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={systemPromptSaving}
+              onClick={() => void onReset()}
+            >
               Reset to default
             </Button>
-            <Button type="button" size="sm" onClick={onSave}>
+            <Button
+              type="button"
+              size="sm"
+              disabled={systemPromptSaving}
+              onClick={() => void onSave()}
+            >
               Save
             </Button>
           </div>

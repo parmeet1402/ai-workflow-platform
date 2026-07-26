@@ -158,11 +158,13 @@ Same pattern as document APIs:
 
 1. `createClient()` → `auth.getUser()` → **401** if missing.
 2. `checkRateLimit(\`chat:${user.id}\`, 20 / 60s)` → **429** + `Retry-After` if exceeded.
-3. `memberships.select("organization_id, role")` → **400** if no org.
-4. Parse/validate body: non-empty `messages` (max 40), each `{ role: "user" | "assistant", content }` (max 8 000 chars, trimmed non-empty); optional `conversationId` (UUID); optional `regenerate: true` (requires `conversationId`); optional `systemPrompt` (string, max 8 000 chars after trim; empty/omitted → built-in RAG instructions).
-5. If `systemPrompt` is non-empty and `memberships.role` is not `owner` → **403** (`Only organization owners can set a custom system prompt`). Owners may customize; other members always use the built-in prompt.
+3. `memberships.select("organization_id")` → **400** if no org.
+4. Load `organizations.system_prompt` for that org (null/empty → built-in `RAG_SYSTEM_PROMPT`). The chat body does **not** accept a client system prompt; source of truth is the org row.
+5. Parse/validate body: non-empty `messages` (max 40), each `{ role: "user" | "assistant", content }` (max 8 000 chars, trimmed non-empty); optional `conversationId` (UUID); optional `regenerate: true` (requires `conversationId`).
 6. Last **user** message is the retrieval query; missing user turn → **400**.
 7. If `conversationId` is set, verify the conversation belongs to the user in their org → **404** / **500** otherwise.
+
+**Org system prompt:** Owners set it via `PATCH /api/organization` `{ systemPrompt }` (string, max 8 000; `null` resets to built-in) → **403** for non-owners. `GET /api/organization` returns `systemPrompt` for the UI. Stored on `organizations.system_prompt` and applies to every member’s chats. A `BEFORE UPDATE` trigger also blocks non-owner changes to `system_prompt` even if RLS allows other org column updates.
 
 Misconfiguration (`OPENAI_API_KEY` / `DATABASE_URL`) before the stream starts returns JSON **500** `"Chat is not configured"`. Failures after the stream opens emit a terminal SSE `error` event instead.
 
@@ -184,7 +186,7 @@ Misconfiguration (`OPENAI_API_KEY` / `DATABASE_URL`) before the stream starts re
 
 `buildRagMessages` (`lib/chat/prompt.ts`) builds a **single-turn** completion:
 
-- **System:** instruction block + labeled chunk excerpts (document name, optional page, similarity). Instruction block is the owner-supplied `systemPrompt` when present; otherwise the built-in `RAG_SYSTEM_PROMPT`. Document context is always appended.
+- **System:** instruction block + labeled chunk excerpts (document name, optional page, similarity). Instruction block is `organizations.system_prompt` when set; otherwise the built-in `RAG_SYSTEM_PROMPT`. Document context is always appended.
 - **User:** the last question.
 
 The default instructions tell the model to answer only from context and to say when the documents do not contain the answer. `chunksToCitations` dedupes by `documentId` + page (cap 8) for the later `citations` event.
