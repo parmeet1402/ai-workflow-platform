@@ -105,12 +105,19 @@ function SystemPromptSettings() {
 }
 
 function TemplatesSettings() {
-  const { templates, addTemplate, updateTemplate, deleteTemplate } =
-    useChatControls();
+  const {
+    templates,
+    templatesLoading,
+    templatesError,
+    addTemplate,
+    updateTemplate,
+    deleteTemplate,
+  } = useChatControls();
   const [editingId, setEditingId] = React.useState<string | null>(null);
   const [nameDraft, setNameDraft] = React.useState("");
   const [bodyDraft, setBodyDraft] = React.useState("");
   const [creating, setCreating] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
 
   const startCreate = () => {
     setCreating(true);
@@ -135,31 +142,51 @@ function TemplatesSettings() {
     setBodyDraft("");
   };
 
-  const onSave = () => {
+  const onSave = async () => {
     if (!bodyDraft.trim()) {
       toast.error("Template body is required");
       return;
     }
-    if (creating) {
-      addTemplate({ name: nameDraft, body: bodyDraft });
-      toast.success("Template created");
-    } else if (editingId) {
-      updateTemplate(editingId, { name: nameDraft, body: bodyDraft });
-      toast.success("Template updated");
+    setSaving(true);
+    try {
+      if (creating) {
+        await addTemplate({ name: nameDraft, body: bodyDraft });
+        toast.success("Template created");
+      } else if (editingId) {
+        await updateTemplate(editingId, { name: nameDraft, body: bodyDraft });
+        toast.success("Template updated");
+      }
+      cancelEdit();
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to save template",
+      );
+    } finally {
+      setSaving(false);
     }
-    cancelEdit();
   };
 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs text-muted-foreground">
-          Manage saved prompts. Insert them from the composer Templates control.
+          Shared with your organization. Insert from the composer Templates
+          control.
         </p>
-        <Button type="button" size="sm" variant="outline" onClick={startCreate}>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={startCreate}
+          disabled={templatesLoading || saving}
+        >
           New template
         </Button>
       </div>
+
+      {templatesError ? (
+        <p className="text-xs text-destructive">{templatesError}</p>
+      ) : null}
 
       {creating || editingId ? (
         <div className="space-y-2 rounded-lg border p-3">
@@ -170,6 +197,7 @@ function TemplatesSettings() {
               value={nameDraft}
               onChange={(e) => setNameDraft(e.target.value)}
               placeholder="Template name"
+              disabled={saving}
             />
           </div>
           <div className="space-y-1.5">
@@ -180,20 +208,36 @@ function TemplatesSettings() {
               onChange={(e) => setBodyDraft(e.target.value)}
               className="min-h-28"
               placeholder="Prompt text…"
+              disabled={saving}
             />
           </div>
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" size="sm" onClick={cancelEdit}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={cancelEdit}
+              disabled={saving}
+            >
               Cancel
             </Button>
-            <Button type="button" size="sm" onClick={onSave}>
+            <Button
+              type="button"
+              size="sm"
+              disabled={saving}
+              onClick={() => void onSave()}
+            >
               Save template
             </Button>
           </div>
         </div>
       ) : null}
 
-      {templates.length === 0 && !creating ? (
+      {templatesLoading ? (
+        <div className="rounded-lg border border-dashed px-3 py-6 text-center text-sm text-muted-foreground">
+          Loading templates…
+        </div>
+      ) : templates.length === 0 && !creating ? (
         <div className="rounded-lg border border-dashed px-3 py-6 text-center text-sm text-muted-foreground">
           No templates yet.
         </div>
@@ -219,6 +263,7 @@ function TemplatesSettings() {
                     variant="ghost"
                     size="icon-xs"
                     aria-label={`Edit ${template.name}`}
+                    disabled={saving}
                     onClick={() => startEdit(template.id)}
                   >
                     <Pencil className="size-3.5" />
@@ -228,9 +273,20 @@ function TemplatesSettings() {
                     variant="ghost"
                     size="icon-xs"
                     aria-label={`Delete ${template.name}`}
+                    disabled={saving}
                     onClick={() => {
-                      deleteTemplate(template.id);
-                      toast.success("Template deleted");
+                      void (async () => {
+                        try {
+                          await deleteTemplate(template.id);
+                          toast.success("Template deleted");
+                        } catch (error) {
+                          toast.error(
+                            error instanceof Error
+                              ? error.message
+                              : "Failed to delete template",
+                          );
+                        }
+                      })();
                     }}
                   >
                     <Trash2 className="size-3.5" />

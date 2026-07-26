@@ -286,11 +286,18 @@ export function TemplatesControl({
   onInsert: (next: string) => void;
   disabled?: boolean;
 }) {
-  const { templates, addTemplate, openSettings } = useChatControls();
+  const {
+    templates,
+    templatesLoading,
+    templatesError,
+    addTemplate,
+    openSettings,
+  } = useChatControls();
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
-  const [saving, setSaving] = React.useState(false);
+  const [naming, setNaming] = React.useState(false);
   const [saveName, setSaveName] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
 
   const hasDraft = Boolean(composerValue.trim());
 
@@ -313,30 +320,48 @@ export function TemplatesControl({
     toast.success("Template inserted");
   };
 
-  const onSaveCurrent = () => {
+  const onSaveCurrent = async () => {
     const body = composerValue.trim();
     if (!body) {
       toast.error("Type a message before saving a template");
       return;
     }
-    addTemplate({
-      name: saveName.trim() || body.slice(0, 40),
-      body,
-    });
-    setSaving(false);
-    setSaveName("");
-    setOpen(false);
-    toast.success("Template saved");
+    setSaving(true);
+    try {
+      await addTemplate({
+        name: saveName.trim() || body.slice(0, 40),
+        body,
+      });
+      setNaming(false);
+      setSaveName("");
+      setOpen(false);
+      toast.success("Template saved");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to save template",
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
-  const onQuickSave = () => {
+  const onQuickSave = async () => {
     const body = composerValue.trim();
     if (!body) return;
-    addTemplate({
-      name: body.slice(0, 40),
-      body,
-    });
-    toast.success("Template saved");
+    setSaving(true);
+    try {
+      await addTemplate({
+        name: body.slice(0, 40),
+        body,
+      });
+      toast.success("Template saved");
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to save template",
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -347,7 +372,7 @@ export function TemplatesControl({
           setOpen(next);
           if (!next) {
             setQuery("");
-            setSaving(false);
+            setNaming(false);
             setSaveName("");
           }
         }}
@@ -376,7 +401,7 @@ export function TemplatesControl({
           <PopoverHeader>
             <PopoverTitle>Templates</PopoverTitle>
             <PopoverDescription>
-              Click a template to insert it into the composer.
+              Shared with your org. Click to insert into the composer.
             </PopoverDescription>
           </PopoverHeader>
 
@@ -390,8 +415,16 @@ export function TemplatesControl({
             />
           </div>
 
+          {templatesError ? (
+            <p className="px-1 text-xs text-destructive">{templatesError}</p>
+          ) : null}
+
           <ul className="max-h-48 space-y-1 overflow-y-auto">
-            {filtered.length === 0 ? (
+            {templatesLoading ? (
+              <li className="px-1 py-4 text-center text-xs text-muted-foreground">
+                Loading templates…
+              </li>
+            ) : filtered.length === 0 ? (
               <li className="px-1 py-4 text-center text-xs text-muted-foreground">
                 No templates found.
               </li>
@@ -415,7 +448,7 @@ export function TemplatesControl({
             )}
           </ul>
 
-          {saving ? (
+          {naming ? (
             <div className="space-y-2 border-t pt-3">
               <Label htmlFor="save-template-name" className="text-xs">
                 Template name
@@ -426,17 +459,24 @@ export function TemplatesControl({
                 onChange={(e) => setSaveName(e.target.value)}
                 placeholder="Name this template"
                 className="h-8 text-xs"
+                disabled={saving}
               />
               <div className="flex justify-end gap-2">
                 <Button
                   type="button"
                   variant="ghost"
                   size="sm"
-                  onClick={() => setSaving(false)}
+                  disabled={saving}
+                  onClick={() => setNaming(false)}
                 >
                   Cancel
                 </Button>
-                <Button type="button" size="sm" onClick={onSaveCurrent}>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={saving}
+                  onClick={() => void onSaveCurrent()}
+                >
                   Save
                 </Button>
               </div>
@@ -464,8 +504,8 @@ export function TemplatesControl({
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() => setSaving(true)}
-                  disabled={!hasDraft}
+                  onClick={() => setNaming(true)}
+                  disabled={!hasDraft || saving}
                 >
                   Save current
                 </Button>
@@ -483,9 +523,9 @@ export function TemplatesControl({
               variant="ghost"
               size="icon-sm"
               className="size-8 text-muted-foreground"
-              disabled={disabled}
+              disabled={disabled || saving}
               aria-label="Save current message as template"
-              onClick={onQuickSave}
+              onClick={() => void onQuickSave()}
             >
               <BookmarkPlus className="size-3.5" />
             </Button>

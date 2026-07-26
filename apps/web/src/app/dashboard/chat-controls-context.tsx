@@ -4,9 +4,11 @@ import * as React from "react";
 import {
   createEmptyStore,
   DRAFT_CHAT_KEY,
+  extractLegacyTemplates,
   getBuiltInSystemPrompt,
   getOrCreateChatControls,
   loadChatControlsStore,
+  loadRawChatControlsJson,
   resolveChatKey,
   saveChatControlsStore,
   type ChatControlsStore,
@@ -28,6 +30,8 @@ type ChatControlsContextValue = {
   model: ChatModelId;
   jsonMode: boolean;
   templates: PromptTemplate[];
+  templatesLoading: boolean;
+  templatesError: string | null;
   settingsOpen: boolean;
   settingsTab: SettingsTab;
   setActiveConversation: (conversationId: string | null) => void;
@@ -39,12 +43,15 @@ type ChatControlsContextValue = {
   resetSystemPrompt: () => Promise<void>;
   setModel: (model: ChatModelId) => void;
   setJsonMode: (on: boolean) => void;
-  addTemplate: (input: { name: string; body: string }) => PromptTemplate;
+  addTemplate: (input: {
+    name: string;
+    body: string;
+  }) => Promise<PromptTemplate>;
   updateTemplate: (
     id: string,
     patch: Partial<Pick<PromptTemplate, "name" | "body">>,
-  ) => void;
-  deleteTemplate: (id: string) => void;
+  ) => Promise<void>;
+  deleteTemplate: (id: string) => Promise<void>;
   openSettings: (tab?: SettingsTab) => void;
   setSettingsOpen: (open: boolean) => void;
   setSettingsTab: (tab: SettingsTab) => void;
@@ -75,6 +82,53 @@ function normalizeOrgSystemPrompt(raw: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function parseTemplatePayload(raw: unknown): PromptTemplate | null {
+  if (!raw || typeof raw !== "object") return null;
+  const t = raw as Partial<PromptTemplate>;
+  if (
+    typeof t.id !== "string" ||
+    typeof t.name !== "string" ||
+    typeof t.body !== "string" ||
+    typeof t.updatedAt !== "string"
+  ) {
+    return null;
+  }
+  return {
+    id: t.id,
+    name: t.name,
+    body: t.body,
+    updatedAt: t.updatedAt,
+  };
+}
+
+async function postTemplate(input: {
+  name: string;
+  body: string;
+}): Promise<PromptTemplate> {
+  const res = await fetch("/api/prompt-templates", {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const payload = (await res.json()) as
+    | { template: unknown }
+    | { error: string };
+  if (!res.ok) {
+    throw new Error(
+      "error" in payload ? payload.error : "Failed to create template",
+    );
+  }
+  if (!("template" in payload)) {
+    throw new Error("Invalid response from server");
+  }
+  const template = parseTemplatePayload(payload.template);
+  if (!template) {
+    throw new Error("Invalid template in response");
+  }
+  return template;
+}
+
 export function ChatControlsProvider({
   children,
 }: {
@@ -86,14 +140,24 @@ export function ChatControlsProvider({
     null,
   );
   const [systemPromptSaving, setSystemPromptSaving] = React.useState(false);
+  const [templates, setTemplates] = React.useState<PromptTemplate[]>([]);
+  const [templatesLoading, setTemplatesLoading] = React.useState(true);
+  const [templatesError, setTemplatesError] = React.useState<string | null>(
+    null,
+  );
   const [conversationId, setConversationId] = React.useState<string | null>(
     null,
   );
   const conversationIdRef = React.useRef<string | null>(null);
+  /** Captured before first save strips legacy `templates[]` from localStorage. */
+  const legacyTemplatesRef = React.useRef<PromptTemplate[] | null>(null);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [settingsTab, setSettingsTab] = React.useState<SettingsTab>("system");
 
   React.useEffect(() => {
+    legacyTemplatesRef.current = extractLegacyTemplates(
+      loadRawChatControlsJson(),
+    );
     setStore(loadChatControlsStore());
     setReady(true);
   }, []);
@@ -120,6 +184,73 @@ export function ChatControlsProvider({
         setOrgSystemPrompt(normalizeOrgSystemPrompt(payload.systemPrompt));
       } catch {
         // Keep built-in prompt in UI if org settings fail to load.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      setTemplatesLoading(true);
+      setTemplatesError(null);
+      try {
+        const res = await fetch("/api/prompt-templates", {
+          credentials: "include",
+          cache: "no-store",
+        });
+        const payload = (await res.json()) as
+          | { templates: unknown }
+          | { error: string };
+        if (!res.ok) {
+          throw new Error(
+            "error" in payload
+              ? payload.error
+              : "Failed to load prompt templates",
+          );
+        }
+        if (!("templates" in payload) || !Array.isArray(payload.templates)) {
+          throw new Error("Invalid response from server");
+        }
+
+        let list = payload.templates
+          .map(parseTemplatePayload)
+          .filter((t): t is PromptTemplate => t != null);
+
+        // One-time migrate: push legacy localStorage templates when server empty.
+        const legacy = legacyTemplatesRef.current ?? [];
+        legacyTemplatesRef.current = [];
+        if (list.length === 0 && legacy.length > 0) {
+          const migrated: PromptTemplate[] = [];
+          for (const item of legacy) {
+            try {
+              migrated.push(
+                await postTemplate({ name: item.name, body: item.body }),
+              );
+            } catch {
+              // Skip individual failures; continue migrating the rest.
+            }
+          }
+          list = migrated;
+        }
+
+        if (cancelled) return;
+        setTemplates(list);
+      } catch (error) {
+        if (cancelled) return;
+        setTemplatesError(
+          error instanceof Error
+            ? error.message
+            : "Failed to load prompt templates",
+        );
+      } finally {
+        if (!cancelled) {
+          setTemplatesLoading(false);
+        }
       }
     })();
 
@@ -250,52 +381,59 @@ export function ChatControlsProvider({
   );
 
   const addTemplate = React.useCallback(
-    (input: { name: string; body: string }) => {
-      const template: PromptTemplate = {
-        id: crypto?.randomUUID?.() ?? `tpl-${Date.now()}`,
-        name: input.name.trim() || "Untitled template",
-        body: input.body,
-        updatedAt: new Date().toISOString(),
-      };
-      setStore((prev) => ({
-        ...prev,
-        templates: [template, ...prev.templates],
-      }));
+    async (input: { name: string; body: string }) => {
+      const template = await postTemplate(input);
+      setTemplates((prev) => [template, ...prev.filter((t) => t.id !== template.id)]);
       return template;
     },
     [],
   );
 
   const updateTemplate = React.useCallback(
-    (
+    async (
       id: string,
       patch: Partial<Pick<PromptTemplate, "name" | "body">>,
     ) => {
-      setStore((prev) => ({
-        ...prev,
-        templates: prev.templates.map((t) =>
-          t.id === id
-            ? {
-                ...t,
-                ...patch,
-                name:
-                  patch.name != null
-                    ? patch.name.trim() || t.name
-                    : t.name,
-                updatedAt: new Date().toISOString(),
-              }
-            : t,
+      const res = await fetch(`/api/prompt-templates/${id}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const payload = (await res.json()) as
+        | { template: unknown }
+        | { error: string };
+      if (!res.ok) {
+        throw new Error(
+          "error" in payload ? payload.error : "Failed to update template",
+        );
+      }
+      if (!("template" in payload)) {
+        throw new Error("Invalid response from server");
+      }
+      const template = parseTemplatePayload(payload.template);
+      if (!template) {
+        throw new Error("Invalid template in response");
+      }
+      setTemplates((prev) =>
+        prev.map((t) => (t.id === id ? template : t)).sort((a, b) =>
+          b.updatedAt.localeCompare(a.updatedAt),
         ),
-      }));
+      );
     },
     [],
   );
 
-  const deleteTemplate = React.useCallback((id: string) => {
-    setStore((prev) => ({
-      ...prev,
-      templates: prev.templates.filter((t) => t.id !== id),
-    }));
+  const deleteTemplate = React.useCallback(async (id: string) => {
+    const res = await fetch(`/api/prompt-templates/${id}`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    const payload = (await res.json()) as { ok?: boolean; error?: string };
+    if (!res.ok) {
+      throw new Error(payload.error ?? "Failed to delete template");
+    }
+    setTemplates((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
   const openSettings = React.useCallback((tab: SettingsTab = "system") => {
@@ -312,7 +450,9 @@ export function ChatControlsProvider({
       systemPromptSaving,
       model: chat.model,
       jsonMode: chat.jsonMode,
-      templates: store.templates,
+      templates,
+      templatesLoading,
+      templatesError,
       settingsOpen,
       settingsTab,
       setActiveConversation,
@@ -334,7 +474,9 @@ export function ChatControlsProvider({
       systemPrompt,
       isCustomSystemPrompt,
       systemPromptSaving,
-      store.templates,
+      templates,
+      templatesLoading,
+      templatesError,
       chat.model,
       chat.jsonMode,
       settingsOpen,

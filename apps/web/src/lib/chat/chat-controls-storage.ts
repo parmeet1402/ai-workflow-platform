@@ -22,11 +22,11 @@ export type PerChatControls = {
   jsonMode: boolean;
 };
 
+/** Client-only chat prefs. Templates live on the server (org-scoped). */
 export type ChatControlsStore = {
   version: 1;
   defaultSystemPrompt: string;
   lastUsedModel: ChatModelId;
-  templates: PromptTemplate[];
   chats: Record<string, PerChatControls>;
 };
 
@@ -47,7 +47,6 @@ export function createEmptyStore(): ChatControlsStore {
     version: 1,
     defaultSystemPrompt: getBuiltInSystemPrompt(),
     lastUsedModel: DEFAULT_CHAT_MODEL,
-    templates: [],
     chats: {},
   };
 }
@@ -102,17 +101,13 @@ export function parseChatControlsStore(raw: unknown): ChatControlsStore {
   const empty = createEmptyStore();
   if (!raw || typeof raw !== "object") return empty;
 
-  const data = raw as Partial<ChatControlsStore>;
+  const data = raw as Partial<ChatControlsStore> & {
+    templates?: unknown;
+  };
   const lastUsedModel =
     typeof data.lastUsedModel === "string" && isChatModelId(data.lastUsedModel)
       ? data.lastUsedModel
       : empty.lastUsedModel;
-
-  const templates = Array.isArray(data.templates)
-    ? data.templates
-        .map(normalizeTemplate)
-        .filter((t): t is PromptTemplate => t != null)
-    : [];
 
   const chats: Record<string, PerChatControls> = {};
   if (data.chats && typeof data.chats === "object") {
@@ -129,9 +124,18 @@ export function parseChatControlsStore(raw: unknown): ChatControlsStore {
         ? data.defaultSystemPrompt
         : empty.defaultSystemPrompt,
     lastUsedModel,
-    templates,
     chats,
   };
+}
+
+/** Read legacy localStorage templates (pre server sync) for one-time migrate. */
+export function extractLegacyTemplates(raw: unknown): PromptTemplate[] {
+  if (!raw || typeof raw !== "object") return [];
+  const data = raw as { templates?: unknown };
+  if (!Array.isArray(data.templates)) return [];
+  return data.templates
+    .map(normalizeTemplate)
+    .filter((t): t is PromptTemplate => t != null);
 }
 
 export function loadChatControlsStore(): ChatControlsStore {
@@ -145,12 +149,30 @@ export function loadChatControlsStore(): ChatControlsStore {
   }
 }
 
+/** Load raw JSON for legacy template migration (before strip on save). */
+export function loadRawChatControlsJson(): unknown | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(CHAT_CONTROLS_STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+}
+
 export function saveChatControlsStore(store: ChatControlsStore) {
   if (typeof window === "undefined") return;
   try {
+    // Never persist templates — they are org-scoped on the server.
     window.localStorage.setItem(
       CHAT_CONTROLS_STORAGE_KEY,
-      JSON.stringify(store),
+      JSON.stringify({
+        version: 1,
+        defaultSystemPrompt: store.defaultSystemPrompt,
+        lastUsedModel: store.lastUsedModel,
+        chats: store.chats,
+      } satisfies ChatControlsStore),
     );
   } catch {
     // Ignore quota / private-mode failures; UI still works in-memory.

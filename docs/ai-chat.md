@@ -26,6 +26,9 @@ Diagrams use [Mermaid](https://mermaid.js.org/).
 | Chat API (SSE) | `apps/web/src/app/api/chat/route.ts` |
 | Conversations list / create | `apps/web/src/app/api/conversations/route.ts` |
 | Conversation detail | `apps/web/src/app/api/conversations/[conversationId]/route.ts` |
+| Prompt templates list / create | `apps/web/src/app/api/prompt-templates/route.ts` |
+| Prompt template update / delete | `apps/web/src/app/api/prompt-templates/[id]/route.ts` |
+| Prompt templates schema | `supabase/migrations/20260726130000_prompt_templates.sql` |
 | Persist helpers | `apps/web/src/lib/chat/persist.ts` |
 | Conversation DTOs | `apps/web/src/types/conversation.ts` |
 | OpenAI client | `apps/web/src/lib/chat/openai.ts` |
@@ -217,6 +220,19 @@ Server framing helper: `formatSseEvent` in `lib/chat/sse.ts`. Response headers d
 
 Schema: `conversations` / `messages` with org-scoped RLS (`supabase/migrations/20260725180000_chat_conversations.sql`).
 
+### Prompt template APIs
+
+Org-scoped saved prompts shared by **all members** (no owner gate). Auth + membership required; RLS mirrors membership.
+
+| Method | Path | Behavior |
+|--------|------|----------|
+| `GET` | `/api/prompt-templates` | List templates for the current org (newest `updated_at` first). |
+| `POST` | `/api/prompt-templates` | Create `{ name?, body }` (`name` ≤ 120, `body` ≤ 8 000; empty name → first 40 chars of body). |
+| `PATCH` | `/api/prompt-templates/:id` | Update `name` and/or `body` (same limits). |
+| `DELETE` | `/api/prompt-templates/:id` | Delete. |
+
+Response shape: `{ id, name, body, updatedAt }` (list wraps as `{ templates }`, create/update as `{ template }`). The dashboard loads them via `ChatControlsProvider`; model / JSON mode stay in localStorage.
+
 ---
 
 ## SSE event contract
@@ -289,7 +305,7 @@ flowchart TB
 
 1. On submit, append the user turn and call `streamChat(toApiMessages(...))` (strips the welcome message).
 2. Create an empty assistant message; show “Assistant is thinking…” until the first `delta`.
-3. `fetch("/api/chat", { credentials: "include", signal, body: { messages, conversationId, regenerate?, model?, jsonMode? } })`. Model and JSON mode come from chat controls (localStorage via `ChatControlsProvider`); model ids are allowlisted. `jsonMode: true` forces structured JSON from the API.
+3. `fetch("/api/chat", { credentials: "include", signal, body: { messages, conversationId, regenerate?, model?, jsonMode? } })`. Model and JSON mode come from chat controls (localStorage via `ChatControlsProvider`); model ids are allowlisted. `jsonMode: true` forces structured JSON from the API. Prompt templates are org-scoped via `/api/prompt-templates` (not localStorage).
 4. If the response is not `text/event-stream`, treat the body as JSON error.
 5. Otherwise `readChatSse` buffers network chunks, splits on `\n\n`, and dispatches typed events:
    - `delta` → append text to the assistant bubble
