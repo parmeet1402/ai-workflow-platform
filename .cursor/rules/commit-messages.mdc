@@ -1,0 +1,36 @@
+---
+description: Helpful for writing commits
+alwaysApply: false
+---
+# Commit Messages
+
+Keep commits simple: **one line only**. No body, no footer, no bullet lists.
+
+## Format
+
+```
+<semantic-name>: <commit-message>
+```
+
+- `semantic-name`: short type such as `fix`, `feat`, `chore`, `refactor`, `docs`, `test`
+- `commit-message`: concise summary of why/what changed (imperative mood preferred)
+
+## Examples
+
+```
+# ✅ GOOD
+fix: block chat when monthly usage cap hit
+feat: add chat model and prompt controls
+chore: bump dependencies
+
+# ❌ BAD — multi-line / body
+fix: block chat when monthly usage cap hit
+
+Also update the usage UI and tests.
+
+# ❌ BAD — missing semantic prefix
+block chat when monthly usage cap hit
+
+# ❌ BAD — too verbose
+fix: implement a comprehensive solution to block users from chatting when they have hit their monthly usage cap
+```
