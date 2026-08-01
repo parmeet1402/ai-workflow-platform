@@ -6,6 +6,12 @@ alwaysApply: false
 
 Keep commits simple: **one line only**. No body, no footer, no bullet lists.
 
+Never add Cursor attribution trailers (or any equivalent), including:
+- `Co-authored-by: Cursor <cursoragent@cursor.com>`
+- `Made-with: Cursor`
+
+Do not use `git commit --trailer` for attribution. Commit message must be the subject line only.
+
 ## Format
 
 ```
